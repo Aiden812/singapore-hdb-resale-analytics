@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local data and generated artifacts
+data/raw/*
+data/processed/*
+database/*
+powerbi/*
+
+# Keep otherwise-empty project directories in Git
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!database/.gitkeep
+!powerbi/.gitkeep
+
+# Editor and operating-system files
+.vscode/
+.DS_Store
+Thumbs.db
