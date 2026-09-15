@@ -14,9 +14,12 @@ carefully.
 I built the full analytics workflow: validated ingestion of official Singapore
 data, reproducible Parquet and SQLite outputs, nominal and inflation-adjusted
 analysis, a quality-adjusted market index, chronological model evaluation, and a
-six-tab Streamlit app with transparent comparable-sales fallbacks. I also added
-provenance checks, automation, documentation and 92 automated tests so the result
-can be audited and refreshed rather than treated as a one-off notebook.
+six-tab Streamlit app with transparent comparable-sales fallbacks. A separate
+HDB Resale Decision Copilot now turns deterministic evidence into plain-language
+answers with structured AI evidence selection, deterministic claim rendering,
+prompt-injection defenses and an offline fallback. Provenance checks, automation,
+documentation and 147 automated tests make the result auditable and refreshable
+rather than a one-off notebook or a thin chatbot wrapper.
 
 ## Three main findings
 
@@ -33,10 +36,11 @@ and excluded from the model and price index.
 
 [**Open the live dashboard**](https://singapore-hdb-resale-analytics-aof7acp9fd7ackqqxmmi5w.streamlit.app/)
 &nbsp;|&nbsp; [**Watch the dashboard walkthrough**](images/dashboard_demo.gif)
+&nbsp;|&nbsp; [**Read the copilot design**](docs/copilot.md)
 &nbsp;|&nbsp; [**Read the complete analysis report**](docs/analysis_report.md)
 
 **Stack:** Python 3.12 · pandas · scikit-learn · Plotly · Streamlit · Parquet ·
-SQLite/SQL · Jupyter · GitHub Actions
+SQLite/SQL · OpenAI Responses API · Pydantic · Jupyter · GitHub Actions
 
 ![Animated walkthrough of the HDB market dashboard](images/dashboard_demo.gif)
 
@@ -61,7 +65,10 @@ SQLite/SQL · Jupyter · GitHub Actions
 - **Portfolio interface:** six dashboard tabs include nominal/real trends, the
   official RPI benchmark, market profiles, an MRT reference map and a
   comparable-sales workflow with explicit fallback logic and CSV export.
-- **Engineering safeguards:** 92 automated tests, real-data app smoke tests,
+- **Grounded AI layer:** deterministic analytics run before the model; accepted
+  numeric surfaces are checked against cited evidence records and recognized
+  units, and any failed check falls back to a deterministic summary.
+- **Engineering safeguards:** 147 automated tests, real-data app smoke tests,
   linting, Python 3.12 CI, bounded HTTP retries, and monthly plus manual refresh
   automation protect the project.
 
@@ -140,6 +147,37 @@ The public app runs on Streamlit Community Cloud from `app.py`. Every push to
 `main` is detected automatically; dependency changes trigger a full rebuild and
 ordinary code changes are reflected in the app shortly after GitHub updates.
 
+## HDB Resale Decision Copilot
+
+The standalone `copilot_app.py` adds a narrow AI product to the same verified
+analytics pipeline without changing the public dashboard. Its four structured
+modes cover market briefs, comparable sales, town comparisons and model
+reliability. Filters select a deterministic calculation; the optional question
+can change only which verified evidence records are prioritised.
+
+```powershell
+# OPENAI_API_KEY is optional; without it the same evidence renders offline.
+$env:OPENAI_API_KEY = "your-key"
+streamlit run copilot_app.py
+```
+
+The model receives a compact evidence packet—not the full transaction dataset.
+Responses use a strict Pydantic schema, `store=False` and a session request cap.
+The model-written draft is never displayed: only its validated evidence-ID
+selection survives, and project code reconstructs every visible claim from the
+cited record. Unknown citations, unsupported numbers and tested prohibited
+phrasing also trigger fallback. If credentials, network access or validation are
+unavailable, the app uses deterministic evidence selection too. Market and town
+comparisons require at least 20 matching transactions; the comparable-sales mode
+exposes its selected minimum and any widening. Inspectable fact IDs, source links,
+sample sizes,
+checksum-verified snapshot coverage and caveats remain visible in both paths.
+
+See the [copilot architecture, setup and limits](docs/copilot.md) and the frozen
+[evaluation cases](evals/copilot_cases.json). The current Ridge artifact remains
+a market-monitoring model: the copilot deliberately does not estimate a unit's
+value because its empirical ranges under-cover the documented target.
+
 ## Analysis architecture
 
 ```mermaid
@@ -159,6 +197,10 @@ flowchart LR
     H --> U[Reports + notebooks]
     Q --> V[Streamlit dashboard]
     R --> V
+    Q --> X[Deterministic copilot evidence]
+    R --> X
+    X --> Y[AI evidence selection or offline selection]
+    Y --> Z[Deterministically rendered claims]
     U --> V
 ```
 
@@ -258,6 +300,7 @@ singapore-hdb-resale-analytics/
 │   └── processed/           # clean + enriched Parquet and provenance
 ├── database/                # generated SQLite database, kept local
 ├── docs/                    # data dictionary and model card
+├── evals/                   # frozen copilot quality and safety cases
 ├── images/                  # charts and dashboard walkthrough
 ├── notebooks/               # executed EDA and portfolio notebooks
 ├── reports/                 # tables, metrics, backtests and provenance
@@ -272,9 +315,12 @@ singapore-hdb-resale-analytics/
 │   ├── geocode_blocks.py
 │   ├── http_retry.py
 │   ├── model_price.py
+│   ├── copilot.py
+│   ├── copilot_tools.py
 │   └── official_enrichment.py
 ├── tests/
 ├── app.py
+├── copilot_app.py
 ├── LICENSE
 ├── THIRD_PARTY_NOTICES.md
 ├── pyproject.toml
@@ -292,14 +338,21 @@ tracked so a fresh clone can open the reviewed dashboard immediately.
 python -m pip check
 python -m ruff check .
 python -m unittest discover -s tests -v
+python scripts/evaluate_copilot.py
 ```
 
-All **92 tests** currently pass. Coverage includes cleaning contracts, lease
+All **147 tests** currently pass. Coverage includes cleaning contracts, lease
 parsing, duplicate policy, safe downloads and retries, SQL indexes and
 reconciliation, RPI normalisation, CPI joins, MRT/LRT validation, time-based
 splits, stronger model baselines, interval diagnostics, error slices,
 comparable-sales fallbacks and exports, notebook execution, report hashes and a
-real Streamlit render.
+real Streamlit render. Copilot coverage adds exact evidence calculations,
+deterministic comparable ranking, structured-response mocks, citation and
+number-and-unit grounding, injection and prohibited-claim failures, no-key/API
+fallbacks, a 40-case evaluator that runs each case's inputs through the tracked
+snapshot and real evidence builders, mutation tests proving declared evaluator
+policies fail when tampered with, and offline Streamlit submissions across all
+four modes.
 
 GitHub Actions runs checks on Python 3.12. The separate **Refresh analysis
 snapshot** workflow runs monthly in `Asia/Singapore` and on manual dispatch. It

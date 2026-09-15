@@ -33,10 +33,13 @@ jobs:
         run: python -m pip check
 
       - name: Compile Python sources
-        run: python -m compileall -q src app.py
+        run: python -m compileall -q src app.py copilot_app.py
 
       - name: Lint Python sources
         run: python -m ruff check .
 
       - name: Run tests
         run: python -m unittest discover -s tests -v
+
+      - name: Run offline copilot evaluation
+        run: python scripts/evaluate_copilot.py

@@ -1,30 +1,39 @@
-# Singapore HDB Resale Market Analytics v1.1.0
+# Singapore HDB Resale Market Analytics v1.2.0
 
-This release tightens the dashboard's data-provenance messaging and improves its
-first-screen presentation without expanding the project's scope.
+This release adds an evidence-grounded HDB Resale Decision Copilot while
+preserving the existing six-tab analytics dashboard and its market-monitoring
+scope.
 
 ## Highlights
 
-- Verified enriched snapshots now display the transaction source observation
-  date rather than the artifact-generation date
-- A regression check protects the 8 September 2026 source date from being shown
-  as 15 September when the default enriched snapshot is loaded
-- MRT content is labelled as an official **reference layer**; the dashboard does
-  not imply that MRT distance is attached to transactions while block-coordinate
-  coverage remains 0%
-- The first screen uses one compact data-coverage notice and a readable
-  price-per-square-metre KPI
-- The README now leads with the intended user, problem, personal contribution,
-  three evidence-backed findings, demo links and technology stack
-- Dashboard preview assets were refreshed for the v1.1 interface
-- Six-tab Streamlit market explorer with transparent comparable sales
-- Official SingStat CPI enrichment and a separately validated LTA MRT-exit
-  reference layer with provenance
-- Four expanding-window model backtests and stronger segment baselines
-- Error slices plus empirical price-range coverage diagnostics
-- Resilient official-data downloads with bounded retry and rate-limit handling
-- Verified Parquet snapshots, SQLite reconciliation and **92 automated tests**
-- MIT-licensed code with complete third-party data attribution
+- A separate Streamlit copilot offers market briefs, comparable sales, town
+  comparisons and model-reliability explanations.
+- All analytics remain deterministic: compact evidence packets carry stable fact
+  and row IDs, source provenance, filters, sample sizes and coverage dates.
+- Optional OpenAI evidence selection uses the Responses API, strict Pydantic
+  Structured Outputs, `store=False` and an environment-configured model.
+- Model-written prose never reaches the display boundary. Only validated
+  evidence-ID choices survive, and every visible claim is reconstructed by
+  deterministic project code.
+- A post-generation gate checks citations, numeric support, recognized units and
+  tested valuation, forecast and financial-advice phrasing. Any failed check
+  falls back to deterministic evidence rather than displaying the draft.
+- Missing credentials, API errors and invalid model output fall back to a useful
+  deterministic summary; the app is fully demonstrable offline.
+- Comparable evidence ranks five closest observed transactions deterministically
+  and exposes exact quartiles, matching tiers and widening criteria.
+- Model evidence includes chronological holdout metrics, rolling folds, interval
+  under-coverage and improvement over the prior-12-month segment baseline.
+- Forty frozen cases route their actual inputs through the tracked HDB snapshot,
+  deterministic evidence builders and model report. They cover normal, sparse,
+  out-of-range, injection, unsupported-request and numerical-grounding behavior.
+- All 147 automated tests pass, including real-data offline submissions through
+  every copilot mode and the unchanged dashboard regression suite.
+- The copilot loads only checksum-verified tracked snapshots and reports the
+  model-metrics hash separately from the compatible transaction-snapshot hash.
+- The original `app.py` remains unchanged; CI now compiles and tests both apps.
+- Dependencies, environment templates, architecture notes and release checks are
+  pinned and documented for a reproducible portfolio review.
 
 ## Snapshot results
 
@@ -37,9 +46,10 @@ first-screen presentation without expanding the project's scope.
 
 ## Important limits
 
-The model is for market monitoring, not formal valuation or financial advice.
-The empirical price range transparently under-covers its nominal 80% backtest
-target.
+The model and copilot are for descriptive market monitoring, not formal
+valuation, future-price prediction or financial advice. The empirical price
+range transparently under-covers its nominal 80% backtest target, so no
+unit-price estimator is exposed.
 
 Block-to-MRT distances remain unavailable until a user supplies a OneMap API
 token and builds the optional block-coordinate cache. The included LTA data is a

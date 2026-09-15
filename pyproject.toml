@@ -4,15 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "singapore-hdb-resale-analytics"
-version = "1.1.0"
+version = "1.2.0"
 description = "Reproducible analytics for Singapore HDB resale transactions"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "matplotlib==3.11.1",
     "numpy==2.5.2",
+    "openai==3.14.0",
     "pandas==3.0.5",
     "plotly==7.0.0",
+    "pydantic==2.13.5",
     "pyarrow==25.0.1",
     "requests==2.34.2",
     "scikit-learn==1.9.0",
