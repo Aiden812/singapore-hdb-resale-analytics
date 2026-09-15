@@ -2,6 +2,7 @@
 
 [![Tests](https://github.com/Aiden812/singapore-hdb-resale-analytics/actions/workflows/tests.yml/badge.svg)](https://github.com/Aiden812/singapore-hdb-resale-analytics/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-0f766e.svg)](LICENSE)
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://singapore-hdb-resale-analytics-aof7acp9fd7ackqqxmmi5w.streamlit.app/)
 
 A production-style analytics portfolio built from official Singapore public data.
 It combines a validated Python pipeline, Parquet and SQLite data products,
@@ -72,6 +73,8 @@ See the [model card](docs/model_card.md),
 methodology and caveats.
 
 ## Dashboard
+[**Open the live dashboard**](https://singapore-hdb-resale-analytics-aof7acp9fd7ackqqxmmi5w.streamlit.app/)
+
 
 Run the interactive application locally:
 
@@ -99,8 +102,9 @@ the full matched set can be downloaded.
 
 ![Static dashboard preview](images/dashboard_preview.png)
 
-The repository is configured for Streamlit Community Cloud. Select `app.py` as
-the entry point and keep `requirements.txt` at the repository root.
+The public app runs on Streamlit Community Cloud from `app.py`. Every push to
+`main` is detected automatically; dependency changes trigger a full rebuild and
+ordinary code changes are reflected in the app shortly after GitHub updates.
 
 ## Analysis architecture
 
