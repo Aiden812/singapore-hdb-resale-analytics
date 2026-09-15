@@ -9,6 +9,8 @@ It combines a validated Python pipeline, Parquet and SQLite data products,
 time-aware model evaluation, an official-data enrichment layer, decision-focused
 notebooks and a six-tab Streamlit application.
 
+[**Read the complete analysis report**](docs/analysis_report.md)
+
 ![Animated walkthrough of the HDB market dashboard](images/dashboard_demo.gif)
 
 ## Why this is more than basic EDA
@@ -32,7 +34,7 @@ notebooks and a six-tab Streamlit application.
 - **Portfolio interface:** six dashboard tabs include nominal/real trends, the
   official RPI benchmark, market profiles, an MRT reference map and a
   comparable-sales workflow with explicit fallback logic and CSV export.
-- **Engineering safeguards:** 88 automated tests, real-data app smoke tests,
+- **Engineering safeguards:** 92 automated tests, real-data app smoke tests,
   linting, Python 3.12 CI, bounded HTTP retries, and monthly plus manual refresh
   automation protect the project.
 
@@ -67,14 +69,14 @@ Additional robustness results:
 - The official LTA layer contributes 541 validated MRT exits across 147 station
   names; all LRT features are excluded.
 
-See the [model card](docs/model_card.md),
+See the [complete analysis report](docs/analysis_report.md),
+[model card](docs/model_card.md),
 [data dictionary](docs/data_dictionary.md) and
 [advanced analysis report](reports/advanced_analysis_report.md) for the complete
 methodology and caveats.
 
 ## Dashboard
 [**Open the live dashboard**](https://singapore-hdb-resale-analytics-aof7acp9fd7ackqqxmmi5w.streamlit.app/)
-
 
 Run the interactive application locally:
 
@@ -86,6 +88,11 @@ The app prefers the tracked, provenance-verified enriched Parquet snapshot and
 falls back to the clean Parquet, a local clean CSV, or a user upload. It displays
 model artifacts only when their recorded hashes match the loaded source
 snapshot.
+
+For a checksum-verified project snapshot, the source strip shows its official
+observation date in Singapore time and nonnegative calendar-day age. The app
+warns when that age exceeds 45 days. User uploads do not receive an
+authoritative freshness label.
 
 Its six tabs cover:
 
@@ -260,7 +267,7 @@ python -m ruff check .
 python -m unittest discover -s tests -v
 ```
 
-All **88 tests** currently pass. Coverage includes cleaning contracts, lease
+All **92 tests** currently pass. Coverage includes cleaning contracts, lease
 parsing, duplicate policy, safe downloads and retries, SQL indexes and
 reconciliation, RPI normalisation, CPI joins, MRT/LRT validation, time-based
 splits, stronger model baselines, interval diagnostics, error slices,

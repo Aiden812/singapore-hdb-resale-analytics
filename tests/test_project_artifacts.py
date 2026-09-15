@@ -78,21 +78,30 @@ class NotebookArtifactTests(unittest.TestCase):
 
 
 class DocumentationArtifactTests(unittest.TestCase):
-    def test_readme_relative_links_resolve(self) -> None:
-        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
-        link_targets = re.findall(r"!?\[[^]]*\]\(([^)]+)\)", readme)
-        local_targets = [
-            target.split("#", maxsplit=1)[0]
-            for target in link_targets
-            if not target.startswith(("http://", "https://", "#"))
-        ]
+    def test_documentation_relative_links_resolve(self) -> None:
+        documents = (
+            PROJECT_ROOT / "README.md",
+            PROJECT_ROOT / "docs" / "analysis_report.md",
+        )
+        for document in documents:
+            with self.subTest(document=document.relative_to(PROJECT_ROOT)):
+                markdown = document.read_text(encoding="utf-8")
+                link_targets = re.findall(
+                    r"!?\[[^]]*\]\(([^)]+)\)",
+                    markdown,
+                )
+                local_targets = [
+                    target.split("#", maxsplit=1)[0]
+                    for target in link_targets
+                    if not target.startswith(("http://", "https://", "#"))
+                ]
 
-        missing = [
-            target
-            for target in local_targets
-            if target and not (PROJECT_ROOT / target).exists()
-        ]
-        self.assertEqual(missing, [])
+                missing = [
+                    target
+                    for target in local_targets
+                    if target and not (document.parent / target).exists()
+                ]
+                self.assertEqual(missing, [])
 
 
 if __name__ == "__main__":

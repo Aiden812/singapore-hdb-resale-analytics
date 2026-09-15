@@ -10,7 +10,7 @@ It is designed for market monitoring, not appraisal or causal inference.
 ## Data
 
 - Source: HDB resale registrations published on data.gov.sg.
-- Current source coverage: January 2017 through 8 September 2026.
+- Tracked snapshot coverage: January 2017 through 8 September 2026.
 - The 512 September 2026 records are provisional and excluded from modelling;
   the model and index use 239,465 records through August 2026.
 - Target: natural logarithm of `resale_price`.
