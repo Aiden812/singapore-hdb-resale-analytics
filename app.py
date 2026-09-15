@@ -23,6 +23,7 @@ from src.dashboard_data import (
     binned_price_profile,
     coverage_by_year,
     filter_transactions,
+    find_comparable_sales,
     flat_type_distribution,
     load_processed_data,
     monthly_trend,
@@ -49,7 +50,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 MODEL_INDEX_PATH = PROJECT_ROOT / "reports" / "quality_adjusted_price_index.csv"
 MODEL_METRICS_PATH = PROJECT_ROOT / "reports" / "price_model_metrics.json"
 SNAPSHOT_METADATA_PATH = PROJECT_ROOT / "data" / "processed" / "snapshot_metadata.json"
-
+ENRICHED_DATA_PATH = PROJECT_ROOT / "data" / "processed" / "hdb_resale_enriched.parquet"
+ENRICHMENT_METADATA_PATH = PROJECT_ROOT / "reports" / "official_enrichment_metadata.json"
+MODEL_INTERVAL_METRICS_PATH = PROJECT_ROOT / "reports" / "price_model_interval_metrics.csv"
+INFLATION_REPORT_PATH = PROJECT_ROOT / "reports" / "monthly_price_inflation.csv"
+MRT_SUMMARY_PATH = PROJECT_ROOT / "reports" / "mrt_proximity_summary.csv"
+MRT_EXITS_PATH = PROJECT_ROOT / "reports" / "mrt_station_exits.csv"
 
 st.markdown(
     """
@@ -136,6 +142,76 @@ def cached_file_sha256(path_string: str, modified_ns: int, file_size: int) -> st
     return file_sha256(Path(path_string))
 
 
+@st.cache_data(show_spinner=False)
+def load_optional_report(path_string: str, modified_ns: int) -> pd.DataFrame:
+    """Load a small optional CSV report and invalidate when it changes."""
+    del modified_ns
+    return pd.read_csv(path_string)
+
+
+def enrichment_metadata() -> dict[str, object] | None:
+    """Return verified enrichment metadata when it is readable."""
+    if not ENRICHMENT_METADATA_PATH.is_file():
+        return None
+    try:
+        metadata = json.loads(ENRICHMENT_METADATA_PATH.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return metadata if isinstance(metadata, dict) else None
+
+
+def default_enriched_snapshot_is_verified() -> bool:
+    """Require matching file hash and row count before preferring enrichment."""
+    metadata = enrichment_metadata()
+    if metadata is None or not ENRICHED_DATA_PATH.is_file():
+        return False
+    enrichment_input = metadata.get("input", {})
+    output = metadata.get("output", {})
+    if not isinstance(enrichment_input, dict) or not isinstance(output, dict):
+        return False
+    try:
+        snapshot = json.loads(SNAPSHOT_METADATA_PATH.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    clean_hashes = {
+        value
+        for value in (
+            snapshot.get("processed_parquet_sha256"),
+            snapshot.get("processed_sha256"),
+        )
+        if isinstance(value, str)
+    }
+    if enrichment_input.get("sha256") not in clean_hashes:
+        return False
+    stat = ENRICHED_DATA_PATH.stat()
+    actual_hash = cached_file_sha256(
+        str(ENRICHED_DATA_PATH),
+        stat.st_mtime_ns,
+        stat.st_size,
+    )
+    if output.get("sha256") != actual_hash:
+        return False
+    input_rows = enrichment_input.get("row_count")
+    expected_rows = output.get("row_count")
+    snapshot_rows = snapshot.get("row_count")
+    return (
+        isinstance(expected_rows, int)
+        and expected_rows > 0
+        and input_rows == expected_rows
+        and snapshot_rows == expected_rows
+    )
+
+
+def optional_report(path: Path) -> pd.DataFrame | None:
+    """Load an optional report without making it a dashboard dependency."""
+    if not path.is_file():
+        return None
+    try:
+        return load_optional_report(str(path), path.stat().st_mtime_ns)
+    except (OSError, ValueError, pd.errors.ParserError):
+        return None
+
+
 def provisional_source_month(
     transactions: pd.DataFrame,
     source_sha256: str,
@@ -196,7 +272,22 @@ def source_matches_model_snapshot(
         )
         if isinstance(value, str)
     }
-    return {source_sha256, model_sha256}.issubset(canonical_hashes)
+    if {source_sha256, model_sha256}.issubset(canonical_hashes):
+        return True
+
+    metadata = enrichment_metadata()
+    if metadata is None:
+        return False
+    enrichment_input = metadata.get("input", {})
+    enrichment_output = metadata.get("output", {})
+    if not isinstance(enrichment_input, dict) or not isinstance(
+        enrichment_output, dict
+    ):
+        return False
+    return (
+        source_sha256 == enrichment_output.get("sha256")
+        and model_sha256 == enrichment_input.get("sha256")
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -276,7 +367,7 @@ def show_data_error(details: str) -> None:
     st.markdown("**Create the local data files with:**")
     st.code("python -m src.download_data\npython -m src.clean_data", language="bash")
     st.caption(
-        "The dashboard prefers data/processed/hdb_resale_clean.parquet, then falls "
+        "The dashboard prefers a checksum-verified enriched snapshot, then falls "
         "back to data/processed/hdb_resale_clean.csv. You can also upload either "
         "format from the sidebar."
     )
@@ -299,11 +390,21 @@ def selected_data_source(
 
     configured_path = os.environ.get("HDB_DATA_PATH")
     candidates = [Path(configured_path)] if configured_path else []
+    if default_enriched_snapshot_is_verified():
+        candidates.append(ENRICHED_DATA_PATH)
     candidates.extend([DEFAULT_PARQUET_PATH, DEFAULT_DATA_PATH])
     for candidate in candidates:
         if candidate.is_file():
             stat = candidate.stat()
             data = load_disk_data(str(candidate), stat.st_mtime_ns, stat.st_size)
+            if candidate == ENRICHED_DATA_PATH:
+                metadata = enrichment_metadata() or {}
+                output = metadata.get("output", {})
+                expected_rows = (
+                    output.get("row_count") if isinstance(output, dict) else None
+                )
+                if expected_rows != len(data):
+                    continue
             try:
                 shown_path = candidate.relative_to(Path(__file__).resolve().parent)
             except ValueError:
@@ -323,11 +424,15 @@ def selected_data_source(
 def monthly_price_figure(trend: pd.DataFrame, metric: str) -> go.Figure:
     """Build the monthly price trend with an optional interquartile band."""
     figure = go.Figure()
-    if metric == "Median resale price":
+    if metric in {"Median resale price", "Median inflation-adjusted price"}:
+        is_real = metric == "Median inflation-adjusted price"
+        median_column = "median_real_price" if is_real else "median_price"
+        q25_column = "real_price_q25" if is_real else "price_q25"
+        q75_column = "real_price_q75" if is_real else "price_q75"
         figure.add_trace(
             go.Scatter(
                 x=trend["month"],
-                y=trend["price_q75"],
+                y=trend[q75_column],
                 mode="lines",
                 line=dict(width=0),
                 hoverinfo="skip",
@@ -337,7 +442,7 @@ def monthly_price_figure(trend: pd.DataFrame, metric: str) -> go.Figure:
         figure.add_trace(
             go.Scatter(
                 x=trend["month"],
-                y=trend["price_q25"],
+                y=trend[q25_column],
                 mode="lines",
                 line=dict(width=0),
                 fill="tonexty",
@@ -346,10 +451,16 @@ def monthly_price_figure(trend: pd.DataFrame, metric: str) -> go.Figure:
                 hoverinfo="skip",
             )
         )
-        y_values = trend["median_price"]
-        y_title = "Median resale price"
+        y_values = trend[median_column]
+        y_title = (
+            "Median real resale price" if is_real else "Median resale price"
+        )
         hover = "%{x|%b %Y}<br>Median: S$%{y:,.0f}<extra></extra>"
-        title = "Monthly median resale price"
+        title = (
+            "Monthly median resale price (inflation-adjusted)"
+            if is_real
+            else "Monthly median resale price"
+        )
     else:
         y_values = trend["median_price_per_sqm"]
         y_title = "Median price per sqm"
@@ -746,6 +857,175 @@ def profile_figure(
     return figure
 
 
+def comparable_distribution_figure(
+    data: pd.DataFrame,
+    *,
+    price_column: str,
+    price_per_sqm_column: str,
+    price_basis: str,
+) -> go.Figure:
+    """Show the observed price and price-per-sqm distributions for comparables."""
+    figure = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=(
+            f"{price_basis} transaction prices",
+            f"{price_basis} price per sqm",
+        ),
+        horizontal_spacing=0.12,
+    )
+    figure.add_trace(
+        go.Histogram(
+            x=data[price_column],
+            nbinsx=28,
+            marker_color=TEAL,
+            opacity=0.86,
+            name="Resale price",
+            hovertemplate="Price: S$%{x:,.0f}<br>Transactions: %{y:,}<extra></extra>",
+        ),
+        row=1,
+        col=1,
+    )
+    figure.add_trace(
+        go.Histogram(
+            x=data[price_per_sqm_column],
+            nbinsx=28,
+            marker_color=AMBER,
+            opacity=0.86,
+            name="Price per sqm",
+            hovertemplate=(
+                "Price per sqm: S$%{x:,.0f}<br>Transactions: "
+                "%{y:,}<extra></extra>"
+            ),
+        ),
+        row=1,
+        col=2,
+    )
+    apply_chart_style(figure, height=390, legend=False)
+    figure.update_layout(
+        title=dict(text="Observed comparable-sale distributions", x=0.01, font=dict(size=18)),
+        bargap=0.05,
+    )
+    figure.update_xaxes(title="Transaction price", tickprefix="S$", tickformat=",", row=1, col=1)
+    figure.update_xaxes(title="Price per sqm", tickprefix="S$", tickformat=",", row=1, col=2)
+    figure.update_yaxes(title="Transactions", row=1, col=1)
+    figure.update_yaxes(title="Transactions", row=1, col=2)
+    return figure
+
+
+def comparable_map_figure(
+    comparable_sales: pd.DataFrame,
+    mrt_exits: pd.DataFrame | None,
+) -> go.Figure | None:
+    """Map comparable blocks with an optional official MRT-station layer."""
+    figure = go.Figure()
+    centre_latitudes: list[float] = []
+    centre_longitudes: list[float] = []
+    has_sales_points = False
+
+    if {"latitude", "longitude"}.issubset(comparable_sales.columns):
+        sales_points = comparable_sales.dropna(subset=["latitude", "longitude"]).copy()
+        if not sales_points.empty:
+            group_columns = [
+                column
+                for column in ("block", "street_name", "latitude", "longitude")
+                if column in sales_points.columns
+            ]
+            sales_points = (
+                sales_points.groupby(group_columns, as_index=False, dropna=False)
+                .agg(
+                    transactions=("resale_price", "size"),
+                    median_resale_price=("resale_price", "median"),
+                )
+                .sort_values("transactions", ascending=False)
+            )
+            labels = []
+            for _, row in sales_points.iterrows():
+                address = " ".join(
+                    str(row[column])
+                    for column in ("block", "street_name")
+                    if column in group_columns and pd.notna(row[column])
+                )
+                labels.append(
+                    f"{address or 'Comparable block'}"
+                    f"<br>Median: {currency(float(row['median_resale_price']))}"
+                    f"<br>Matches: {int(row['transactions']):,}"
+                )
+            figure.add_trace(
+                go.Scattermap(
+                    lat=sales_points["latitude"],
+                    lon=sales_points["longitude"],
+                    mode="markers",
+                    marker=dict(size=11, color=TEAL, opacity=0.82),
+                    text=labels,
+                    hovertemplate="%{text}<extra>Comparable block</extra>",
+                    name="Comparable blocks",
+                )
+            )
+            has_sales_points = True
+            centre_latitudes.extend(sales_points["latitude"].astype(float).tolist())
+            centre_longitudes.extend(sales_points["longitude"].astype(float).tolist())
+
+    if (
+        mrt_exits is not None
+        and {"latitude", "longitude"}.issubset(mrt_exits.columns)
+    ):
+        stations = mrt_exits.dropna(subset=["latitude", "longitude"]).copy()
+        station_name_column = next(
+            (
+                column
+                for column in ("station_name", "nearest_mrt_station", "name")
+                if column in stations.columns
+            ),
+            None,
+        )
+        if not stations.empty:
+            station_labels = (
+                stations[station_name_column].astype(str)
+                if station_name_column
+                else pd.Series("MRT exit", index=stations.index)
+            )
+            figure.add_trace(
+                go.Scattermap(
+                    lat=stations["latitude"],
+                    lon=stations["longitude"],
+                    mode="markers",
+                    marker=dict(size=7, color=AMBER, opacity=0.68),
+                    text=station_labels,
+                    hovertemplate="%{text}<extra>MRT station exit</extra>",
+                    name="MRT exits",
+                )
+            )
+            if not centre_latitudes:
+                centre_latitudes.extend(stations["latitude"].astype(float).tolist())
+                centre_longitudes.extend(stations["longitude"].astype(float).tolist())
+
+    if not figure.data or not centre_latitudes:
+        return None
+    apply_chart_style(figure, height=500)
+    figure.update_layout(
+        title=dict(
+            text=(
+                "Comparable blocks and MRT network"
+                if has_sales_points
+                else "MRT network reference"
+            ),
+            x=0.01,
+            font=dict(size=18),
+        ),
+        map=dict(
+            style="open-street-map",
+            center=dict(
+                lat=float(np.median(centre_latitudes)),
+                lon=float(np.median(centre_longitudes)),
+            ),
+            zoom=11,
+        ),
+        margin=dict(l=12, r=12, t=58, b=12),
+    )
+    return figure
+
+
 def exact_storey_profile(data: pd.DataFrame) -> pd.DataFrame:
     """Aggregate prices by the midpoint of each source storey band."""
     valid = data.dropna(subset=["storey_mid"])
@@ -973,17 +1253,37 @@ st.caption(
     "sample sizes and exact values."
 )
 
-overview_tab, market_mix_tab, mix_tab, drivers_tab, notes_tab = st.tabs(
-    ["Overview", "Market vs mix", "Price & mix", "Property profiles", "Data notes"]
+(
+    overview_tab,
+    comparable_tab,
+    market_mix_tab,
+    mix_tab,
+    drivers_tab,
+    notes_tab,
+) = st.tabs(
+    [
+        "Overview",
+        "Comparable sales",
+        "Market vs mix",
+        "Price & mix",
+        "Property profiles",
+        "Data notes",
+    ]
 )
 
 with overview_tab:
     st.markdown(
         '<p class="section-kicker">Direction over time</p>', unsafe_allow_html=True
     )
+    trend_options = ["Median resale price"]
+    if "median_real_price" in monthly.columns and monthly[
+        "median_real_price"
+    ].notna().any():
+        trend_options.append("Median inflation-adjusted price")
+    trend_options.append("Median price per sqm")
     trend_metric = st.radio(
         "Monthly trend metric",
-        ["Median resale price", "Median price per sqm"],
+        trend_options,
         horizontal=True,
         label_visibility="collapsed",
         key="monthly_metric",
@@ -995,6 +1295,24 @@ with overview_tab:
             width="stretch",
             config={"displaylogo": False, "scrollZoom": False},
         )
+        if trend_metric == "Median inflation-adjusted price":
+            last_real_month = monthly.loc[
+                monthly["median_real_price"].notna(), "month"
+            ].max()
+            reference_values = (
+                transactions["cpi_reference_month"].dropna()
+                if "cpi_reference_month" in transactions.columns
+                else pd.Series(dtype="string")
+            )
+            reference_note = (
+                f", restated to {reference_values.iloc[0]}"
+                if not reference_values.empty
+                else ""
+            )
+            st.caption(
+                f"Real-price series available through {last_real_month:%b %Y}"
+                f"{reference_note}; later months await official CPI publication."
+            )
     with annual_column:
         st.plotly_chart(
             annual_market_figure(annual, full_coverage),
@@ -1069,6 +1387,499 @@ with overview_tab:
             "raw count when annual transaction volume changes.</p>",
             unsafe_allow_html=True,
         )
+
+
+with comparable_tab:
+    st.markdown(
+        '<p class="section-kicker">Recent evidence for a similar flat</p>',
+        unsafe_allow_html=True,
+    )
+    st.subheader("Comparable Sales Explorer")
+    st.write(
+        "Choose a property profile to inspect registered transactions in the same "
+        "town and flat type. Matching starts narrowly and widens only when fewer "
+        "than 20 observations are available."
+    )
+    st.warning(
+        "This is an exploratory comparison of historical transactions—not a formal "
+        "valuation, appraisal, offer recommendation or guarantee of a future sale price.",
+        icon="⚖️",
+    )
+
+    selector_columns = st.columns(2, gap="large")
+    with selector_columns[0]:
+        comparable_town = st.selectbox(
+            "Town",
+            options=all_towns,
+            format_func=readable_name,
+            key="comparable_town",
+        )
+    available_comparable_types = sorted(
+        transactions.loc[
+            transactions["town"].eq(comparable_town), "flat_type"
+        ].dropna().unique()
+    )
+    preferred_type_index = (
+        available_comparable_types.index("4 ROOM")
+        if "4 ROOM" in available_comparable_types
+        else 0
+    )
+    with selector_columns[1]:
+        comparable_flat_type = st.selectbox(
+            "Flat type",
+            options=available_comparable_types,
+            index=preferred_type_index,
+            format_func=readable_name,
+            key="comparable_flat_type",
+        )
+
+    comparable_pool = transactions.loc[
+        transactions["town"].eq(comparable_town)
+        & transactions["flat_type"].eq(comparable_flat_type)
+    ]
+    area_values = comparable_pool["floor_area_sqm"].dropna()
+    default_area = float(area_values.median())
+    detail_columns = st.columns(4, gap="medium")
+    with detail_columns[0]:
+        target_floor_area = float(
+            st.number_input(
+                "Floor area (sqm)",
+                min_value=float(area_values.min()),
+                max_value=float(area_values.max()),
+                value=float(round(default_area)),
+                step=1.0,
+                key="comparable_area",
+            )
+        )
+
+    storey_values = comparable_pool["storey_mid"].dropna()
+    with detail_columns[1]:
+        if storey_values.empty:
+            target_storey = None
+            st.text_input(
+                "Approximate storey",
+                value="Unavailable",
+                disabled=True,
+                key="comparable_storey_unavailable",
+            )
+        else:
+            target_storey = float(
+                st.number_input(
+                    "Approximate storey",
+                    min_value=float(storey_values.min()),
+                    max_value=float(storey_values.max()),
+                    value=float(round(float(storey_values.median()))),
+                    step=1.0,
+                    help="Midpoint of the source three-storey band.",
+                    key="comparable_storey",
+                )
+            )
+
+    lease_values = comparable_pool["remaining_lease_years"].dropna()
+    with detail_columns[2]:
+        if lease_values.empty:
+            target_lease = None
+            st.text_input(
+                "Remaining lease",
+                value="Unavailable",
+                disabled=True,
+                key="comparable_lease_unavailable",
+            )
+        else:
+            target_lease = float(
+                st.number_input(
+                    "Remaining lease (years)",
+                    min_value=float(max(0, np.floor(lease_values.min()))),
+                    max_value=float(np.ceil(lease_values.max())),
+                    value=float(round(float(lease_values.median()))),
+                    step=1.0,
+                    key="comparable_lease",
+                )
+            )
+
+    with detail_columns[3]:
+        comparable_months = int(
+            st.selectbox(
+                "Recent period",
+                options=[12, 24, 36, 60],
+                index=1,
+                format_func=lambda months: f"Latest {months} months",
+                key="comparable_months",
+            )
+        )
+
+    comparable_result = find_comparable_sales(
+        transactions,
+        town=comparable_town,
+        flat_type=comparable_flat_type,
+        floor_area_sqm=target_floor_area,
+        storey_mid=target_storey,
+        remaining_lease_years=target_lease,
+        recent_months=comparable_months,
+        minimum_transactions=20,
+    )
+    comparable_sales = comparable_result.transactions
+    if comparable_sales.empty:
+        st.info(comparable_result.explanation, icon="🔎")
+    else:
+        st.info(comparable_result.explanation, icon="🧭")
+        real_price_columns_available = {
+            "resale_price_real_sgd",
+            "price_per_sqm_real_sgd",
+        }.issubset(comparable_sales.columns) and comparable_sales[
+            ["resale_price_real_sgd", "price_per_sqm_real_sgd"]
+        ].dropna().shape[0] > 0
+        if real_price_columns_available:
+            price_basis = st.radio(
+                "Price basis",
+                ["Nominal", "Inflation-adjusted"],
+                horizontal=True,
+                key="comparable_price_basis",
+                help=(
+                    "Inflation-adjusted values are expressed in the CPI reference "
+                    "month documented by the enrichment report."
+                ),
+            )
+        else:
+            price_basis = "Nominal"
+
+        if price_basis == "Inflation-adjusted":
+            price_column = "resale_price_real_sgd"
+            price_per_sqm_column = "price_per_sqm_real_sgd"
+            summary_data = comparable_sales.dropna(
+                subset=[price_column, price_per_sqm_column]
+            )
+        else:
+            price_column = "resale_price"
+            price_per_sqm_column = "price_per_sqm"
+            summary_data = comparable_sales
+
+        if price_basis == "Inflation-adjusted" and len(summary_data) < len(
+            comparable_sales
+        ):
+            missing_real_prices = len(comparable_sales) - len(summary_data)
+            reference_values = (
+                comparable_sales["cpi_reference_month"].dropna()
+                if "cpi_reference_month" in comparable_sales.columns
+                else pd.Series(dtype="string")
+            )
+            reference_note = (
+                f" Values are restated to {reference_values.iloc[0]}."
+                if not reference_values.empty
+                else ""
+            )
+            st.caption(
+                f"{missing_real_prices:,} recent matches are omitted because official "
+                f"CPI was not yet available for their transaction month.{reference_note}"
+            )
+        price_quantiles = summary_data[price_column].quantile([0.10, 0.90])
+        comparable_kpis = st.columns(4)
+        with comparable_kpis[0]:
+            st.metric(
+                "Comparable transactions",
+                f"{len(summary_data):,}",
+                help=f"Matching tier: {comparable_result.match_level}.",
+            )
+        with comparable_kpis[1]:
+            st.metric(
+                "Observed median",
+                currency(float(summary_data[price_column].median())),
+            )
+        with comparable_kpis[2]:
+            st.metric(
+                "Observed middle 80%",
+                (
+                    f"{currency(float(price_quantiles.loc[0.10]), compact=True)}–"
+                    f"{currency(float(price_quantiles.loc[0.90]), compact=True)}"
+                ),
+                help="10th to 90th percentile; this is not a prediction interval.",
+            )
+        with comparable_kpis[3]:
+            st.metric(
+                "Median price per sqm",
+                f"{currency(float(summary_data[price_per_sqm_column].median()))}/sqm",
+            )
+        st.caption(
+            f"Observed minimum to maximum: "
+            f"{currency(float(summary_data[price_column].min()))} to "
+            f"{currency(float(summary_data[price_column].max()))}. The displayed "
+            "range describes past comparables and is not an estimate for a specific flat."
+        )
+        st.plotly_chart(
+            comparable_distribution_figure(
+                summary_data,
+                price_column=price_column,
+                price_per_sqm_column=price_per_sqm_column,
+                price_basis=price_basis,
+            ),
+            width="stretch",
+            config={"displaylogo": False, "scrollZoom": False},
+        )
+
+        interval_report = optional_report(MODEL_INTERVAL_METRICS_PATH)
+        with st.expander("Model uncertainty and validation"):
+            interval_columns = {"lower_price", "median_price", "upper_price"}
+            valid_intervals = (
+                comparable_sales.dropna(subset=list(interval_columns))
+                if interval_columns.issubset(comparable_sales.columns)
+                else comparable_sales.iloc[0:0]
+            )
+            if not valid_intervals.empty:
+                interval_kpis = st.columns(3)
+                with interval_kpis[0]:
+                    st.metric(
+                        "Median lower bound",
+                        currency(float(valid_intervals["lower_price"].median())),
+                    )
+                with interval_kpis[1]:
+                    st.metric(
+                        "Median model estimate",
+                        currency(float(valid_intervals["median_price"].median())),
+                    )
+                with interval_kpis[2]:
+                    st.metric(
+                        "Median upper bound",
+                        currency(float(valid_intervals["upper_price"].median())),
+                    )
+                st.caption(
+                    "These summarize row-level model intervals across the matching "
+                    "transactions; they are not a valuation interval for the selected flat."
+                )
+            elif (
+                interval_report is not None
+                and not interval_report.empty
+                and {
+                    "empirical_coverage",
+                    "target_coverage",
+                    "median_interval_width",
+                    "test_rows",
+                }.issubset(interval_report.columns)
+            ):
+                valid_report = interval_report.dropna(
+                    subset=[
+                        "empirical_coverage",
+                        "target_coverage",
+                        "median_interval_width",
+                        "test_rows",
+                    ]
+                ).copy()
+                weights = pd.to_numeric(
+                    valid_report["test_rows"], errors="coerce"
+                ).fillna(0)
+                if not valid_report.empty and float(weights.sum()) > 0:
+                    rolling_coverage = float(
+                        valid_report["empirical_coverage"].astype(float).mean()
+                    )
+                    rolling_width = float(
+                        valid_report["median_interval_width"].astype(float).mean()
+                    )
+                    target_coverage = float(
+                        valid_report["target_coverage"].astype(float).median()
+                    )
+                    latest_interval = valid_report.iloc[-1]
+                    validation_kpis = st.columns(3)
+                    with validation_kpis[0]:
+                        st.metric(
+                            "Rolling coverage",
+                            percent(rolling_coverage),
+                        )
+                    with validation_kpis[1]:
+                        st.metric(
+                            "Target coverage",
+                            percent(target_coverage),
+                        )
+                    with validation_kpis[2]:
+                        st.metric(
+                            "Typical interval width",
+                            currency(rolling_width),
+                        )
+                    st.caption(
+                        f"Mean across {len(valid_report):,} chronological folds and "
+                        f"{int(weights.sum()):,} test transactions. Latest-fold coverage "
+                        f"was {percent(float(latest_interval['empirical_coverage']))}. "
+                        "These aggregate diagnostics do not provide a property-specific "
+                        "valuation interval."
+                    )
+            else:
+                st.caption(
+                    "Calibrated prediction-interval diagnostics will appear here when "
+                    "the optional model interval report is generated."
+                )
+
+        inflation_report = optional_report(INFLATION_REPORT_PATH)
+        with st.expander("Inflation-adjusted context"):
+            if real_price_columns_available:
+                st.write(
+                    "Use the price-basis control above to compare registered nominal "
+                    "prices with values restated to a common CPI reference month."
+                )
+            elif inflation_report is not None and {
+                "nominal_price_index",
+                "real_price_index",
+                "cpi_reference_month",
+            }.issubset(inflation_report.columns):
+                latest_inflation = inflation_report.iloc[-1]
+                inflation_kpis = st.columns(2)
+                with inflation_kpis[0]:
+                    st.metric(
+                        "Latest nominal index",
+                        f"{float(latest_inflation['nominal_price_index']):.1f}",
+                    )
+                with inflation_kpis[1]:
+                    st.metric(
+                        "Latest real-price index",
+                        f"{float(latest_inflation['real_price_index']):.1f}",
+                    )
+                st.caption(
+                    "Whole-market context only. Upload or generate the enriched "
+                    "transaction snapshot to switch individual comparables to real prices."
+                )
+            else:
+                st.caption(
+                    "Inflation-adjusted controls will appear here when CPI enrichment "
+                    "has been generated."
+                )
+
+        mrt_exits = optional_report(MRT_EXITS_PATH)
+        mrt_summary = optional_report(MRT_SUMMARY_PATH)
+        map_figure = comparable_map_figure(comparable_sales, mrt_exits)
+        with st.expander(
+            "Comparable blocks and MRT context",
+            expanded=map_figure is not None,
+        ):
+            if map_figure is not None:
+                st.plotly_chart(
+                    map_figure,
+                    width="stretch",
+                    config={"displaylogo": False, "scrollZoom": False},
+                )
+                geocoded_sales = (
+                    comparable_sales.dropna(subset=["latitude", "longitude"])
+                    if {"latitude", "longitude"}.issubset(comparable_sales.columns)
+                    else comparable_sales.iloc[0:0]
+                )
+                if geocoded_sales.empty:
+                    st.caption(
+                        "The map currently shows the official MRT-exit reference layer. "
+                        "Comparable blocks will appear after OneMap geocoding enrichment."
+                    )
+                elif "nearest_mrt_distance_m" in geocoded_sales.columns:
+                    distance_values = geocoded_sales[
+                        "nearest_mrt_distance_m"
+                    ].dropna()
+                    if not distance_values.empty:
+                        st.metric(
+                            "Median distance to nearest MRT exit",
+                            f"{float(distance_values.median()):,.0f} m",
+                        )
+            else:
+                st.caption(
+                    "The block/MRT map will appear when transaction coordinates or "
+                    "the optional MRT-station reference report are available."
+                )
+
+            if (
+                mrt_summary is not None
+                and not mrt_summary.empty
+                and {
+                    "mrt_distance_band",
+                    "transaction_count",
+                    "median_price_per_sqm",
+                }.issubset(mrt_summary.columns)
+            ):
+                mrt_figure = go.Figure(
+                    go.Bar(
+                        x=mrt_summary["mrt_distance_band"],
+                        y=mrt_summary["median_price_per_sqm"],
+                        marker_color=TEAL,
+                        customdata=mrt_summary[["transaction_count"]],
+                        hovertemplate=(
+                            "%{x}<br>Median: S$%{y:,.0f}/sqm<br>Transactions: "
+                            "%{customdata[0]:,}<extra></extra>"
+                        ),
+                    )
+                )
+                apply_chart_style(mrt_figure, height=350, legend=False)
+                mrt_figure.update_layout(
+                    title=dict(
+                        text="Price per sqm by MRT-distance band",
+                        x=0.01,
+                        font=dict(size=18),
+                    )
+                )
+                mrt_figure.update_xaxes(title="Distance to nearest MRT exit")
+                mrt_figure.update_yaxes(
+                    title="Median price per sqm",
+                    tickprefix="S$",
+                    tickformat=",",
+                )
+                st.plotly_chart(
+                    mrt_figure,
+                    width="stretch",
+                    config={"displaylogo": False, "scrollZoom": False},
+                )
+
+        table_columns = [
+            column
+            for column in (
+                "month",
+                "block",
+                "street_name",
+                "address_key",
+                "town",
+                "flat_type",
+                "storey_range",
+                "floor_area_sqm",
+                "remaining_lease_years",
+                "resale_price",
+                "price_per_sqm",
+                "resale_price_real_sgd",
+                "price_per_sqm_real_sgd",
+                "cpi_all_items",
+                "cpi_reference_month",
+                "nearest_mrt_station",
+                "nearest_mrt_exit_code",
+                "nearest_mrt_distance_m",
+            )
+            if column in comparable_sales.columns
+        ]
+        export_sales = comparable_sales[table_columns].copy()
+        export_sales["month"] = export_sales["month"].dt.strftime("%Y-%m")
+        st.subheader("Matching transactions")
+        st.dataframe(
+            export_sales.head(250),
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "resale_price": st.column_config.NumberColumn(format="dollar"),
+                "price_per_sqm": st.column_config.NumberColumn(format="dollar"),
+                "resale_price_real_sgd": st.column_config.NumberColumn(
+                    "Real resale price",
+                    format="dollar",
+                ),
+                "price_per_sqm_real_sgd": st.column_config.NumberColumn(
+                    "Real price per sqm",
+                    format="dollar",
+                ),
+                "nearest_mrt_distance_m": st.column_config.NumberColumn(
+                    "Nearest MRT distance (m)",
+                    format="localized",
+                ),
+            },
+        )
+        if len(export_sales) > 250:
+            st.caption(
+                "The table previews the 250 most recent matches; the download includes "
+                f"all {len(export_sales):,}."
+            )
+        st.download_button(
+            "Download comparable transactions (CSV)",
+            data=export_sales.to_csv(index=False).encode("utf-8"),
+            file_name="hdb_comparable_sales.csv",
+            mime="text/csv",
+            key="download_comparable_sales",
+        )
+
 
 with market_mix_tab:
     st.markdown(

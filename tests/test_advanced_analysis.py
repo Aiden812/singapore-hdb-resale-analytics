@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pandas as pd
 
@@ -249,6 +249,28 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(session.get.call_count, 2)
         first_response.raise_for_status.assert_called_once()
         second_response.raise_for_status.assert_called_once()
+
+    def test_retries_throttled_rpi_page_without_real_wait(self) -> None:
+        throttled = Mock(status_code=429, headers={"Retry-After": "4"})
+        succeeded = Mock(status_code=200, headers={})
+        succeeded.json.return_value = {
+            "success": True,
+            "result": {
+                "total": 1,
+                "records": [{"quarter": "2020-Q1", "index": "100"}],
+            },
+        }
+        session = Mock()
+        session.get.side_effect = [throttled, succeeded]
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "rpi.csv"
+            with patch("src.http_retry.time.sleep") as sleep:
+                rows = download_rpi_dataset(output, session=session)
+
+        self.assertEqual(rows, 1)
+        sleep.assert_called_once_with(4.0)
+        self.assertEqual(session.get.call_count, 2)
 
     def test_reconciles_python_and_sql_annual_medians(self) -> None:
         frame = pd.DataFrame(

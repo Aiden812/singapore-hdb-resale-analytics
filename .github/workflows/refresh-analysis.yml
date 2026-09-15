@@ -2,6 +2,9 @@ name: Refresh analysis snapshot
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 10 * *"
+      timezone: "Asia/Singapore"
 
 permissions:
   contents: read
@@ -10,6 +13,8 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      DATA_GOV_SG_API_KEY: ${{ secrets.DATA_GOV_SG_API_KEY }}
 
     steps:
       - name: Check out repository
@@ -29,6 +34,7 @@ jobs:
           python src/download_data.py --force
           python src/clean_data.py
           python src/build_database.py
+          python src/official_enrichment.py --refresh-cpi --refresh-mrt
 
       - name: Generate advanced reports and model
         run: |
@@ -53,6 +59,7 @@ jobs:
           if-no-files-found: error
           path: |
             data/processed/hdb_resale_clean.parquet
+            data/processed/hdb_resale_enriched.parquet
             data/processed/snapshot_metadata.json
             data/raw/hdb_resale_rpi.csv
             images/*.png

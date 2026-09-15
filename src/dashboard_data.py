@@ -8,6 +8,7 @@ the analytical definitions be tested without starting a web server.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
@@ -30,6 +31,20 @@ BASE_COLUMNS = {
 
 class DashboardDataError(ValueError):
     """Raised when a CSV cannot support the dashboard calculations."""
+
+
+@dataclass(frozen=True)
+class ComparableSalesResult:
+    """Comparable transactions plus an explanation of the matching tier used."""
+
+    transactions: pd.DataFrame
+    match_level: str
+    explanation: str
+    requested_months: int
+    effective_months: int
+    floor_area_tolerance: float
+    storey_tolerance: float | None
+    lease_tolerance: float | None
 
 
 def parse_remaining_lease_months(values: pd.Series) -> pd.Series:
@@ -149,7 +164,207 @@ def prepare_dashboard_data(data: pd.DataFrame) -> pd.DataFrame:
         lease_start = pd.to_numeric(prepared["lease_commence_date"], errors="coerce")
         prepared["flat_age"] = prepared["year"] - lease_start
 
+    optional_aliases = {
+        "resale_price_real_sgd": (
+            "resale_price_real_sgd",
+            "real_resale_price",
+            "cpi_adjusted_resale_price",
+            "resale_price_real",
+        ),
+        "price_per_sqm_real_sgd": (
+            "price_per_sqm_real_sgd",
+            "real_price_per_sqm",
+            "cpi_adjusted_price_per_sqm",
+        ),
+        "cpi_all_items": ("cpi_all_items", "cpi_index"),
+        "latitude": ("latitude", "lat"),
+        "longitude": ("longitude", "longitude_dd", "lon", "lng"),
+        "nearest_mrt_distance_m": (
+            "nearest_mrt_distance_m",
+            "mrt_distance_m",
+        ),
+        "lower_price": (
+            "lower_price",
+            "prediction_lower",
+            "predicted_price_lower",
+        ),
+        "median_price": (
+            "median_price",
+            "prediction_median",
+            "predicted_price",
+        ),
+        "upper_price": (
+            "upper_price",
+            "prediction_upper",
+            "predicted_price_upper",
+        ),
+    }
+    for canonical, aliases in optional_aliases.items():
+        source = next((alias for alias in aliases if alias in prepared.columns), None)
+        if source is not None:
+            prepared[canonical] = pd.to_numeric(prepared[source], errors="coerce")
+
+    if "nearest_mrt_distance_m" not in prepared.columns:
+        distance_km_source = next(
+            (
+                column
+                for column in ("nearest_mrt_distance_km", "mrt_distance_km")
+                if column in prepared.columns
+            ),
+            None,
+        )
+        if distance_km_source is not None:
+            prepared["nearest_mrt_distance_m"] = (
+                pd.to_numeric(prepared[distance_km_source], errors="coerce") * 1_000
+            )
+    if "nearest_mrt_distance_m" in prepared.columns:
+        prepared["nearest_mrt_distance_km"] = (
+            prepared["nearest_mrt_distance_m"] / 1_000
+        )
+
+    if (
+        "resale_price_real_sgd" in prepared.columns
+        and "price_per_sqm_real_sgd" not in prepared.columns
+    ):
+        prepared["price_per_sqm_real_sgd"] = (
+            prepared["resale_price_real_sgd"] / prepared["floor_area_sqm"]
+        )
+
+    if "nearest_mrt_station" not in prepared.columns:
+        station_source = next(
+            (
+                column
+                for column in ("nearest_mrt_name", "mrt_station")
+                if column in prepared.columns
+            ),
+            None,
+        )
+        if station_source is not None:
+            prepared["nearest_mrt_station"] = prepared[station_source]
+    for column in ("nearest_mrt_station", "mrt_distance_band"):
+        if column in prepared.columns:
+            prepared[column] = prepared[column].astype("string").str.strip()
+
     return prepared.sort_values("month", kind="stable").reset_index(drop=True)
+
+
+def find_comparable_sales(
+    data: pd.DataFrame,
+    *,
+    town: str,
+    flat_type: str,
+    floor_area_sqm: float,
+    storey_mid: float | None,
+    remaining_lease_years: float | None,
+    recent_months: int = 24,
+    minimum_transactions: int = 20,
+) -> ComparableSalesResult:
+    """Find recent comparable transactions with explicit, staged fallbacks.
+
+    Town and flat type always match exactly. The first tier uses narrow property
+    bands; later tiers widen those bands and, only when needed, extend history.
+    The returned explanation is suitable for showing directly in the dashboard.
+    """
+    if recent_months < 1:
+        raise ValueError("recent_months must be positive")
+    if minimum_transactions < 1:
+        raise ValueError("minimum_transactions must be positive")
+    if floor_area_sqm <= 0:
+        raise ValueError("floor_area_sqm must be positive")
+    if data.empty:
+        return ComparableSalesResult(
+            transactions=data.copy(),
+            match_level="No matches",
+            explanation="The selected snapshot contains no transactions.",
+            requested_months=recent_months,
+            effective_months=recent_months,
+            floor_area_tolerance=5,
+            storey_tolerance=3 if storey_mid is not None else None,
+            lease_tolerance=5 if remaining_lease_years is not None else None,
+        )
+
+    latest_month = pd.Timestamp(data["month"].max()).to_period("M").to_timestamp()
+    base = data.loc[
+        data["town"].eq(str(town).strip().upper())
+        & data["flat_type"].eq(str(flat_type).strip().upper())
+    ]
+
+    tiers = [
+        ("Close match", recent_months, 5.0, 3.0, 5.0),
+        ("Wider property bands", recent_months, 10.0, 6.0, 10.0),
+        ("Longer history", max(recent_months, 60), 10.0, 6.0, 10.0),
+        ("Broad town-and-type match", max(recent_months, 60), 15.0, None, 15.0),
+    ]
+
+    last_result = base.iloc[0:0].copy()
+    selected_tier = tiers[-1]
+    for tier in tiers:
+        label, months, area_tolerance, storey_tolerance, lease_tolerance = tier
+        cutoff = latest_month - pd.DateOffset(months=months - 1)
+        mask = base["month"].ge(cutoff)
+        mask &= base["floor_area_sqm"].between(
+            floor_area_sqm - area_tolerance,
+            floor_area_sqm + area_tolerance,
+            inclusive="both",
+        )
+        if storey_mid is not None and storey_tolerance is not None:
+            mask &= base["storey_mid"].between(
+                storey_mid - storey_tolerance,
+                storey_mid + storey_tolerance,
+                inclusive="both",
+            )
+        if remaining_lease_years is not None and lease_tolerance is not None:
+            mask &= base["remaining_lease_years"].between(
+                remaining_lease_years - lease_tolerance,
+                remaining_lease_years + lease_tolerance,
+                inclusive="both",
+            )
+        last_result = base.loc[mask].copy()
+        selected_tier = tier
+        if len(last_result) >= minimum_transactions:
+            break
+
+    label, months, area_tolerance, storey_tolerance, lease_tolerance = selected_tier
+    if last_result.empty:
+        explanation = (
+            "No transactions matched even after widening the property bands. "
+            "Try another town, flat type or floor area."
+        )
+    else:
+        band_details = [f"floor area ±{area_tolerance:g} sqm"]
+        if storey_mid is not None and storey_tolerance is not None:
+            band_details.append(f"storey midpoint ±{storey_tolerance:g}")
+        if remaining_lease_years is not None and lease_tolerance is not None:
+            band_details.append(f"remaining lease ±{lease_tolerance:g} years")
+        explanation = (
+            f"{label}: exact town and flat type, "
+            + ", ".join(band_details)
+            + f", using the latest {months} months in the snapshot."
+        )
+        if len(last_result) < minimum_transactions:
+            explanation += (
+                f" Only {len(last_result):,} matches were available, below the "
+                f"{minimum_transactions:,}-transaction stability target."
+            )
+        elif label != "Close match":
+            explanation += (
+                f" The criteria were widened because the closer tiers contained "
+                f"fewer than {minimum_transactions:,} transactions."
+            )
+
+    return ComparableSalesResult(
+        transactions=last_result.sort_values("month", ascending=False, kind="stable")
+        .reset_index(drop=True),
+        match_level=label,
+        explanation=explanation,
+        requested_months=recent_months,
+        effective_months=months,
+        floor_area_tolerance=area_tolerance,
+        storey_tolerance=storey_tolerance if storey_mid is not None else None,
+        lease_tolerance=(
+            lease_tolerance if remaining_lease_years is not None else None
+        ),
+    )
 
 
 def load_processed_csv(path_or_buffer: str | Path | IO[bytes]) -> pd.DataFrame:
@@ -223,7 +438,7 @@ def coverage_by_year(data: pd.DataFrame) -> pd.DataFrame:
 
 def monthly_trend(data: pd.DataFrame) -> pd.DataFrame:
     """Return monthly price, price-per-area and volume statistics."""
-    return (
+    trend = (
         data.groupby("month", as_index=False)
         .agg(
             median_price=("resale_price", "median"),
@@ -236,6 +451,24 @@ def monthly_trend(data: pd.DataFrame) -> pd.DataFrame:
         .sort_values("month")
         .reset_index(drop=True)
     )
+    if "resale_price_real_sgd" in data.columns:
+        real_trend = (
+            data.groupby("month", as_index=False)
+            .agg(
+                median_real_price=("resale_price_real_sgd", "median"),
+                real_price_q25=(
+                    "resale_price_real_sgd",
+                    lambda values: values.quantile(0.25),
+                ),
+                real_price_q75=(
+                    "resale_price_real_sgd",
+                    lambda values: values.quantile(0.75),
+                ),
+            )
+            .sort_values("month")
+        )
+        trend = trend.merge(real_trend, on="month", how="left", validate="one_to_one")
+    return trend
 
 
 def annual_trend(data: pd.DataFrame) -> pd.DataFrame:

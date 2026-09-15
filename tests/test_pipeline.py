@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import MagicMock, Mock, patch
 
 import pandas as pd
 
@@ -17,7 +19,7 @@ from src.clean_data import (
     parse_remaining_lease_months,
     write_snapshot_metadata,
 )
-from src.download_data import validate_download
+from src.download_data import download_dataset, validate_download
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -115,6 +117,40 @@ class CleanDataTests(unittest.TestCase):
 
 
 class DownloadValidationTests(unittest.TestCase):
+    def test_retries_api_rate_limit_without_leaking_key_to_export_url(self) -> None:
+        throttled = Mock(status_code=429, headers={"Retry-After": "5"})
+        initiated = Mock(status_code=200, headers={})
+        ready = Mock(status_code=200, headers={})
+        ready.json.return_value = {
+            "data": {"url": "https://storage.example.test/export.csv"}
+        }
+        exported = MagicMock(status_code=200, headers={})
+        exported.__enter__.return_value = exported
+        exported.iter_content.return_value = [
+            pd.DataFrame([source_record()]).to_csv(index=False).encode("utf-8")
+        ]
+        session = MagicMock()
+        session.get.side_effect = [throttled, initiated, ready, exported]
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory) / "download.csv"
+            with (
+                patch("src.download_data.requests.Session") as session_factory,
+                patch("src.http_retry.time.sleep") as sleep,
+                patch.dict(os.environ, {"DATA_GOV_SG_API_KEY": "test-secret"}),
+            ):
+                session_factory.return_value.__enter__.return_value = session
+                size = download_dataset(output_path)
+
+            self.assertGreater(size, 0)
+            validate_download(output_path)
+
+        sleep.assert_called_once_with(5.0)
+        self.assertEqual(session.get.call_count, 4)
+        for api_call in session.get.call_args_list[:3]:
+            self.assertEqual(api_call.kwargs["headers"]["x-api-key"], "test-secret")
+        self.assertNotIn("headers", session.get.call_args_list[3].kwargs)
+
     def test_accepts_expected_csv_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "valid.csv"

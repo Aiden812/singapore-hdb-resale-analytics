@@ -16,11 +16,16 @@ from src.model_price import (
     chronological_holdout,
     derive_quality_adjusted_index,
     evaluate_chronological_holdout,
+    evaluate_rolling_backtests,
     exclude_provisional_latest_month,
+    expanding_window_splits,
+    fit_calibrated_interval_model,
     fit_hedonic_model,
     parse_remaining_lease,
+    prediction_interval_metrics,
     prepare_model_data,
     run_analysis,
+    segment_median_baseline,
 )
 
 
@@ -135,6 +140,56 @@ class ModelDataTests(unittest.TestCase):
             predictions = model.predict_price(holdout)
         self.assertTrue(np.isfinite(predictions).all())
 
+    def test_expanding_window_splits_are_ordered_and_non_overlapping(self) -> None:
+        prepared = prepare_model_data(synthetic_transactions(month_count=42))
+        splits = expanding_window_splits(
+            prepared,
+            test_months=6,
+            max_splits=3,
+            min_train_months=18,
+        )
+
+        self.assertEqual(len(splits), 3)
+        self.assertEqual([fold for fold, *_ in splits], [1, 2, 3])
+        self.assertEqual(
+            [train["month"].nunique() for _, train, _, _ in splits], [24, 30, 36]
+        )
+        for _, train, test, cutoff in splits:
+            self.assertLess(train["month"].max(), test["month"].min())
+            self.assertEqual(test["month"].nunique(), 6)
+            self.assertEqual(cutoff, test["month"].min())
+
+    def test_segment_median_baseline_uses_safe_fallback_hierarchy(self) -> None:
+        train = pd.DataFrame(
+            {
+                "month": ["2022-01-01"] * 4,
+                "town": ["A", "A", "A", "B"],
+                "flat_type": ["3 ROOM", "3 ROOM", "4 ROOM", "3 ROOM"],
+                "resale_price": [100.0, 200.0, 300.0, 400.0],
+            }
+        )
+        test = pd.DataFrame(
+            {
+                "month": ["2023-01-01"] * 4,
+                "town": ["A", "A", "C", "C"],
+                "flat_type": ["3 ROOM", "5 ROOM", "3 ROOM", "5 ROOM"],
+                "resale_price": [1.0] * 4,
+            }
+        )
+
+        predictions, metadata = segment_median_baseline(train, test)
+
+        np.testing.assert_allclose(predictions, [150.0, 200.0, 200.0, 250.0])
+        self.assertEqual(
+            metadata["fallback_counts"],
+            {
+                "flat_type": 1,
+                "global": 1,
+                "town": 1,
+                "town_x_flat_type": 1,
+            },
+        )
+
 
 class HedonicModelTests(unittest.TestCase):
     def test_model_beats_baseline_and_reports_grouped_importance(self) -> None:
@@ -163,6 +218,82 @@ class HedonicModelTests(unittest.TestCase):
                 "flat_type",
                 "flat_model",
             },
+        )
+
+    def test_calibrated_quantiles_are_ordered_and_report_coverage(self) -> None:
+        prepared = prepare_model_data(synthetic_transactions(month_count=30))
+        train, holdout, _ = chronological_holdout(prepared, holdout_months=6)
+        origin = train["month"].min()
+        train = add_trend_features(train, origin)
+        holdout = add_trend_features(holdout, origin)
+        point_model = fit_hedonic_model(
+            train,
+            time_mode="trend",
+            ridge_alpha=1e-6,
+        )
+
+        interval_model = fit_calibrated_interval_model(
+            train,
+            point_model=point_model,
+            ridge_alpha=1e-6,
+            calibration_months=4,
+        )
+        predictions = interval_model.predict_quantiles(holdout)
+        metrics = prediction_interval_metrics(
+            holdout["resale_price"],
+            predictions,
+            lower_quantile=interval_model.lower_quantile,
+            upper_quantile=interval_model.upper_quantile,
+        )
+
+        self.assertTrue(
+            (predictions["lower_price"] <= predictions["median_price"]).all()
+        )
+        self.assertTrue(
+            (predictions["median_price"] <= predictions["upper_price"]).all()
+        )
+        np.testing.assert_allclose(
+            predictions["median_price"],
+            point_model.predict_price(holdout),
+            rtol=1e-12,
+        )
+        self.assertEqual(metrics["target_coverage"], 0.8)
+        self.assertGreaterEqual(metrics["empirical_coverage"], 0.0)
+        self.assertLessEqual(metrics["empirical_coverage"], 1.0)
+        self.assertEqual(interval_model.calibration["calibration_months"], 4)
+
+    def test_rolling_backtests_report_every_model_and_interval_fold(self) -> None:
+        backtests = evaluate_rolling_backtests(
+            synthetic_transactions(month_count=42),
+            test_months=6,
+            max_splits=3,
+            min_train_months=18,
+            ridge_alpha=1e-6,
+            interval_calibration_months=4,
+        )
+
+        self.assertEqual(backtests.fold_metrics["fold"].nunique(), 3)
+        self.assertEqual(len(backtests.interval_metrics), 3)
+        self.assertEqual(
+            set(backtests.fold_metrics["model"]),
+            {
+                "training_median_baseline",
+                "town_flat_type_median_baseline",
+                "prior_12m_town_flat_type_median_baseline",
+                "hedonic_ridge",
+            },
+        )
+        self.assertTrue(
+            backtests.interval_metrics["empirical_coverage"].between(0, 1).all()
+        )
+        self.assertTrue(
+            (
+                backtests.interval_metrics["training_end_month"]
+                < backtests.interval_metrics["test_start_month"]
+            ).all()
+        )
+        self.assertTrue(
+            backtests.interval_metrics["median_model"].eq("hedonic_ridge").all()
         )
 
     def test_adjusted_index_is_deterministic_and_recovers_known_trend(self) -> None:
@@ -208,6 +339,9 @@ class HedonicModelTests(unittest.TestCase):
                 reports_dir / "price_model_metrics.json",
                 reports_dir / "price_model_permutation_importance.csv",
                 reports_dir / "quality_adjusted_price_index.csv",
+                reports_dir / "price_model_backtests.csv",
+                reports_dir / "price_model_error_slices.csv",
+                reports_dir / "price_model_interval_metrics.csv",
                 images_dir / "raw_vs_quality_adjusted_price_index.png",
             }
             self.assertTrue(
@@ -234,6 +368,20 @@ class HedonicModelTests(unittest.TestCase):
             self.assertEqual(
                 stored_summary["input_provenance"]["sha256"],
                 summary["input_provenance"]["sha256"],
+            )
+            self.assertEqual(stored_summary["rolling_backtests"]["folds"], 1)
+            self.assertEqual(
+                stored_summary["holdout_prediction_interval"]["target_coverage"],
+                0.8,
+            )
+            self.assertIn(
+                "prior_12m_town_flat_type_median_baseline",
+                stored_summary["holdout_metrics"],
+            )
+            error_slices = pd.read_csv(reports_dir / "price_model_error_slices.csv")
+            self.assertEqual(
+                set(error_slices["slice_dimension"]),
+                {"town", "flat_type", "price_band", "remaining_lease_band"},
             )
 
 

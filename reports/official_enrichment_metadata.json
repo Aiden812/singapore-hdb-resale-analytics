@@ -1,0 +1,76 @@
+{
+  "cpi": {
+    "coverage_pct": 98.7361,
+    "definition": "resale_price_real_sgd = resale_price * reference-month CPI / transaction-month CPI",
+    "matched_rows": 236944,
+    "reference_month": "2026-07",
+    "source": {
+      "api_url": "https://data.gov.sg/api/action/datastore_search",
+      "bytes": 11750,
+      "dataset_id": "d_bdaff844e3ef89d39fceb962ff8f0791",
+      "dataset_title": "Consumer Price Index (CPI), 2024 As Base Year, Monthly",
+      "dataset_url": "https://data.gov.sg/datasets/d_bdaff844e3ef89d39fceb962ff8f0791/view",
+      "file": "data/raw/singapore_cpi_all_items.csv",
+      "licence_url": "https://data.gov.sg/open-data-licence",
+      "modified_at_utc": "2026-09-15T05:26:33.620461+00:00",
+      "month_count": 787,
+      "month_max": "2026-07",
+      "month_min": "1961-01",
+      "sha256": "94dccbd45ea0898ff6eac1e5535aa70fd2dc5271fdf9466b50fc31b58dbfe42c"
+    },
+    "status": "partial",
+    "unmatched_months": [
+      "2026-08",
+      "2026-09"
+    ]
+  },
+  "generated_at_utc": "2026-09-15T05:48:27.864795+00:00",
+  "input": {
+    "bytes": 3148293,
+    "file": "data/processed/hdb_resale_clean.parquet",
+    "modified_at_utc": "2026-09-08T20:50:58.453525+00:00",
+    "month_max": "2026-09",
+    "month_min": "2017-01",
+    "row_count": 239977,
+    "sha256": "dc1a9a47f28f8b5cb90e0f7f8cc702e14f1e1f9f9135ea5a55cb8ce6820f5ed5"
+  },
+  "limitations": [
+    "Nearest-MRT distances are unavailable because block_coordinates.csv has not been generated. Set ONEMAP_API_TOKEN and run src/geocode_blocks.py; no block coordinates were fabricated.",
+    "CPI-adjusted prices are unavailable for transaction months not yet published in the official CPI series; values were not forward-filled."
+  ],
+  "mrt": {
+    "block_coordinates": null,
+    "coverage_pct": 0.0,
+    "distance_definition": "Straight-line great-circle distance from the OneMap block point to the nearest official MRT station exit (LRT exits excluded).",
+    "eligible_unique_addresses": 9743,
+    "matched_rows": 0,
+    "matched_unique_addresses": 0,
+    "source": {
+      "bytes": 244317,
+      "cache_available": true,
+      "dataset_id": "d_b39d3a0871985372d7e1637193335da5",
+      "dataset_title": "LTA MRT Station Exit (GEOJSON)",
+      "dataset_url": "https://data.gov.sg/datasets/d_b39d3a0871985372d7e1637193335da5/view",
+      "download_api_url": "https://api-open.data.gov.sg/v1/public/api/datasets/d_b39d3a0871985372d7e1637193335da5/poll-download",
+      "file": "data/raw/mrt_station_exits.geojson",
+      "licence_url": "https://data.gov.sg/open-data-licence",
+      "modified_at_utc": "2026-09-15T05:26:35.482161+00:00",
+      "mrt_exit_count": 541,
+      "sha256": "384759788fc0bc6956431ff38d8e3c9a294a59c75b7b41ec86deb90b7d92e243"
+    },
+    "status": "unavailable_missing_block_coordinates"
+  },
+  "output": {
+    "bytes": 5740644,
+    "column_count": 21,
+    "file": "data/processed/hdb_resale_enriched.parquet",
+    "modified_at_utc": "2026-09-15T05:48:27.665874+00:00",
+    "row_count": 239977,
+    "sha256": "816fd773e661dbef400118e5f15029fc1ed3cbb55d499f8afcceac19dfe3f9c7"
+  },
+  "outputs": {
+    "monthly_price_inflation": "reports/monthly_price_inflation.csv",
+    "mrt_proximity_summary": "reports/mrt_proximity_summary.csv",
+    "mrt_station_exits": "reports/mrt_station_exits.csv"
+  }
+}

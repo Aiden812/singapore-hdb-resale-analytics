@@ -42,6 +42,31 @@ DEFAULT_INDEX_RIDGE_ALPHA = 0.0
 DEFAULT_PERMUTATION_REPEATS = 3
 DEFAULT_IMPORTANCE_SAMPLE_SIZE = 30_000
 
+DEFAULT_BACKTEST_SPLITS = 4
+DEFAULT_BACKTEST_MIN_TRAIN_MONTHS = 24
+DEFAULT_INTERVAL_CALIBRATION_MONTHS = 6
+DEFAULT_INTERVAL_QUANTILES = (0.10, 0.50, 0.90)
+
+SEGMENT_COLUMNS = ("town", "flat_type")
+PRICE_BAND_EDGES = (-np.inf, 300_000, 400_000, 500_000, 700_000, 1_000_000, np.inf)
+PRICE_BAND_LABELS = (
+    "Below $300k",
+    "$300k-$399k",
+    "$400k-$499k",
+    "$500k-$699k",
+    "$700k-$999k",
+    "$1m and above",
+)
+LEASE_BAND_EDGES = (-np.inf, 50, 60, 70, 80, 90, np.inf)
+LEASE_BAND_LABELS = (
+    "Below 50 years",
+    "50-59 years",
+    "60-69 years",
+    "70-79 years",
+    "80-89 years",
+    "90 years and above",
+)
+
 BASE_REQUIRED_COLUMNS = {
     "month",
     "town",
@@ -117,6 +142,48 @@ class ModelEvaluation:
     metrics: dict[str, dict[str, float]]
     permutation_importance: pd.DataFrame
     split: dict[str, object]
+    error_slices: pd.DataFrame
+    interval_metrics: dict[str, object]
+
+
+@dataclass
+class CalibratedIntervalModel:
+    """A hedonic point model with time-ordered residual quantile offsets."""
+
+    model: HedonicPriceModel
+    lower_quantile: float
+    median_quantile: float
+    upper_quantile: float
+    lower_log_offset: float
+    median_log_offset: float
+    upper_log_offset: float
+    calibration: dict[str, object]
+
+    def predict_quantiles(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Return lower, median and upper prices in ascending order."""
+        predicted_log_price = self.model.predict_log_price(df)
+        return pd.DataFrame(
+            {
+                "lower_price": np.exp(
+                    np.clip(predicted_log_price + self.lower_log_offset, -50.0, 50.0)
+                ),
+                "median_price": np.exp(
+                    np.clip(predicted_log_price + self.median_log_offset, -50.0, 50.0)
+                ),
+                "upper_price": np.exp(
+                    np.clip(predicted_log_price + self.upper_log_offset, -50.0, 50.0)
+                ),
+            },
+            index=df.index,
+        )
+
+
+@dataclass
+class BacktestEvaluation:
+    """Results from non-overlapping expanding-window backtest folds."""
+
+    fold_metrics: pd.DataFrame
+    interval_metrics: pd.DataFrame
 
 
 def parse_remaining_lease(values: pd.Series) -> pd.Series:
@@ -253,6 +320,56 @@ def chronological_holdout(
     return train, holdout, cutoff
 
 
+def expanding_window_splits(
+    df: pd.DataFrame,
+    *,
+    test_months: int = DEFAULT_HOLDOUT_MONTHS,
+    max_splits: int = DEFAULT_BACKTEST_SPLITS,
+    min_train_months: int = DEFAULT_BACKTEST_MIN_TRAIN_MONTHS,
+) -> list[tuple[int, pd.DataFrame, pd.DataFrame, pd.Timestamp]]:
+    """Build non-overlapping, expanding-window splits ending at the latest month."""
+    if test_months < 1:
+        raise ValueError("test_months must be at least 1")
+    if max_splits < 1:
+        raise ValueError("max_splits must be at least 1")
+    if min_train_months < 1:
+        raise ValueError("min_train_months must be at least 1")
+    if "month" not in df.columns:
+        raise ValueError("Model data is missing required column: month")
+
+    transaction_month = pd.to_datetime(df["month"]).dt.to_period("M").dt.to_timestamp()
+    months = pd.DatetimeIndex(transaction_month.unique()).sort_values()
+    possible_splits = (len(months) - min_train_months) // test_months
+    split_count = min(max_splits, possible_splits)
+    if split_count < 1:
+        raise ValueError(
+            "Not enough distinct months for an expanding-window backtest: "
+            f"found {len(months)}, need at least "
+            f"{min_train_months + test_months}"
+        )
+
+    first_test_position = len(months) - split_count * test_months
+    splits: list[tuple[int, pd.DataFrame, pd.DataFrame, pd.Timestamp]] = []
+    for fold_number in range(1, split_count + 1):
+        test_start_position = first_test_position + (fold_number - 1) * test_months
+        test_month_index = months[
+            test_start_position : test_start_position + test_months
+        ]
+        cutoff = pd.Timestamp(test_month_index[0])
+        train = df.loc[transaction_month.lt(cutoff)].copy()
+        test = df.loc[transaction_month.isin(test_month_index)].copy()
+        if train["month"].nunique() < min_train_months:
+            raise RuntimeError(
+                "Expanding-window split violated minimum training history"
+            )
+        if test["month"].nunique() != test_months:
+            raise RuntimeError(
+                "Expanding-window split produced an incomplete test window"
+            )
+        splits.append((fold_number, train, test, cutoff))
+    return splits
+
+
 def _make_estimator(
     numeric_features: tuple[str, ...],
     categorical_features: tuple[str, ...],
@@ -347,6 +464,7 @@ def regression_metrics(
         raise ValueError("actual and predicted must contain only finite values")
 
     error = actual_values - predicted_values
+    absolute_error = np.abs(error)
     squared_error = float(np.dot(error, error))
     centered_actual = actual_values - actual_values.mean()
     total_variation = float(np.dot(centered_actual, centered_actual))
@@ -355,10 +473,289 @@ def regression_metrics(
     else:
         r_squared = 1.0 - squared_error / total_variation
     return {
-        "mae": float(np.mean(np.abs(error))),
+        "mae": float(np.mean(absolute_error)),
+        "median_absolute_error": float(np.median(absolute_error)),
+        "p90_absolute_error": float(np.quantile(absolute_error, 0.90)),
         "rmse": float(np.sqrt(np.mean(np.square(error)))),
         "r2": float(r_squared),
+        "mape_pct": float(np.mean(absolute_error / actual_values) * 100.0),
     }
+
+
+def segment_median_baseline(
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    *,
+    lookback_months: int | None = None,
+) -> tuple[np.ndarray, dict[str, object]]:
+    """Predict segment medians with progressively broader, safe fallbacks."""
+    required = {"month", "town", "flat_type", "resale_price"}
+    missing = sorted(
+        required.difference(train.columns) | required.difference(test.columns)
+    )
+    if missing:
+        raise ValueError(
+            "Baseline data is missing required columns: " + ", ".join(missing)
+        )
+    if train.empty or test.empty:
+        raise ValueError("Baseline train and test partitions must be non-empty")
+    if lookback_months is not None and lookback_months < 1:
+        raise ValueError("lookback_months must be at least 1")
+
+    reference = train
+    if lookback_months is not None:
+        test_start = pd.Timestamp(test["month"].min()).to_period("M").to_timestamp()
+        reference_start = test_start - pd.DateOffset(months=lookback_months)
+        reference_month = (
+            pd.to_datetime(train["month"]).dt.to_period("M").dt.to_timestamp()
+        )
+        reference = train.loc[
+            reference_month.ge(reference_start) & reference_month.lt(test_start)
+        ]
+        if reference.empty:
+            reference = train
+
+    prediction = np.full(len(test), np.nan, dtype="float64")
+    fallback_level = np.full(len(test), "unassigned", dtype=object)
+
+    def fill_from_group(columns: tuple[str, ...], level_name: str) -> None:
+        lookup = (
+            reference.groupby(list(columns), as_index=False, observed=True)[
+                "resale_price"
+            ]
+            .median()
+            .rename(columns={"resale_price": "_baseline_price"})
+        )
+        candidates = (
+            test.loc[:, list(columns)]
+            .reset_index(drop=True)
+            .merge(lookup, how="left", on=list(columns), sort=False)["_baseline_price"]
+            .to_numpy(dtype="float64")
+        )
+        available = np.isnan(prediction) & np.isfinite(candidates)
+        prediction[available] = candidates[available]
+        fallback_level[available] = level_name
+
+    fill_from_group(SEGMENT_COLUMNS, "town_x_flat_type")
+    fill_from_group(("town",), "town")
+    fill_from_group(("flat_type",), "flat_type")
+
+    global_median = float(reference["resale_price"].median())
+    if not np.isfinite(global_median):
+        global_median = float(train["resale_price"].median())
+    missing_prediction = np.isnan(prediction)
+    prediction[missing_prediction] = global_median
+    fallback_level[missing_prediction] = "global"
+
+    counts = pd.Series(fallback_level, dtype="string").value_counts(sort=False)
+    metadata: dict[str, object] = {
+        "lookback_months": lookback_months,
+        "reference_start_month": pd.Timestamp(reference["month"].min()).strftime(
+            "%Y-%m"
+        ),
+        "reference_end_month": pd.Timestamp(reference["month"].max()).strftime("%Y-%m"),
+        "reference_rows": len(reference),
+        "global_fallback_median_price": global_median,
+        "fallback_counts": {
+            str(level): int(count) for level, count in counts.sort_index().items()
+        },
+    }
+    return prediction, metadata
+
+
+def fit_calibrated_interval_model(
+    train: pd.DataFrame,
+    *,
+    point_model: HedonicPriceModel | None = None,
+    ridge_alpha: float = DEFAULT_RIDGE_ALPHA,
+    calibration_months: int = DEFAULT_INTERVAL_CALIBRATION_MONTHS,
+    quantiles: tuple[float, float, float] = DEFAULT_INTERVAL_QUANTILES,
+) -> CalibratedIntervalModel:
+    """Calibrate centered log-residual price quantiles on recent training months.
+
+    Residual tail spreads come from a strictly later calibration partition, while
+    the median remains anchored to the full-training point model after refitting.
+    """
+    lower_quantile, median_quantile, upper_quantile = quantiles
+    if not 0 < lower_quantile < median_quantile < upper_quantile < 1:
+        raise ValueError("quantiles must be strictly increasing and inside (0, 1)")
+    if calibration_months < 1:
+        raise ValueError("calibration_months must be at least 1")
+
+    months = pd.DatetimeIndex(pd.to_datetime(train["month"]).unique()).sort_values()
+    if len(months) < 2:
+        raise ValueError("Interval calibration requires at least two training months")
+    effective_calibration_months = min(calibration_months, len(months) - 1)
+    calibration_cutoff = pd.Timestamp(months[-effective_calibration_months])
+    transaction_month = (
+        pd.to_datetime(train["month"]).dt.to_period("M").dt.to_timestamp()
+    )
+    development = train.loc[transaction_month.lt(calibration_cutoff)].copy()
+    calibration = train.loc[transaction_month.ge(calibration_cutoff)].copy()
+    if development.empty or calibration.empty:
+        raise RuntimeError("Interval calibration produced an empty partition")
+
+    calibration_model = fit_hedonic_model(
+        development,
+        time_mode="trend",
+        ridge_alpha=ridge_alpha,
+    )
+    calibration_residual = np.log(
+        calibration["resale_price"].to_numpy(dtype="float64")
+    ) - calibration_model.predict_log_price(calibration)
+    offsets = np.quantile(calibration_residual, quantiles)
+    if point_model is None:
+        point_model = fit_hedonic_model(
+            train,
+            time_mode="trend",
+            ridge_alpha=ridge_alpha,
+        )
+
+    center_log_offset = float(np.log(point_model.smearing_factor))
+    centered_offsets = offsets - offsets[1] + center_log_offset
+
+    return CalibratedIntervalModel(
+        model=point_model,
+        lower_quantile=lower_quantile,
+        median_quantile=median_quantile,
+        upper_quantile=upper_quantile,
+        lower_log_offset=float(centered_offsets[0]),
+        median_log_offset=float(centered_offsets[1]),
+        upper_log_offset=float(centered_offsets[2]),
+        calibration={
+            "calibration_start_month": pd.Timestamp(
+                calibration["month"].min()
+            ).strftime("%Y-%m"),
+            "calibration_end_month": pd.Timestamp(calibration["month"].max()).strftime(
+                "%Y-%m"
+            ),
+            "calibration_rows": len(calibration),
+            "calibration_months": effective_calibration_months,
+            "development_rows": len(development),
+            "calibration_median_log_residual": float(offsets[1]),
+            "interval_center_log_offset": center_log_offset,
+        },
+    )
+
+
+def prediction_interval_metrics(
+    actual: np.ndarray | pd.Series,
+    predictions: pd.DataFrame,
+    *,
+    lower_quantile: float,
+    upper_quantile: float,
+) -> dict[str, float]:
+    """Measure empirical coverage, width and median-prediction accuracy."""
+    required = {"lower_price", "median_price", "upper_price"}
+    missing = sorted(required.difference(predictions.columns))
+    if missing:
+        raise ValueError(
+            "Interval predictions are missing required columns: " + ", ".join(missing)
+        )
+
+    actual_values = np.asarray(actual, dtype="float64")
+    lower = predictions["lower_price"].to_numpy(dtype="float64")
+    median = predictions["median_price"].to_numpy(dtype="float64")
+    upper = predictions["upper_price"].to_numpy(dtype="float64")
+    if not (
+        len(actual_values) == len(lower) == len(median) == len(upper)
+        and len(actual_values) > 0
+    ):
+        raise ValueError("Interval arrays must be non-empty and have equal lengths")
+    if not (
+        np.isfinite(actual_values).all()
+        and np.isfinite(lower).all()
+        and np.isfinite(median).all()
+        and np.isfinite(upper).all()
+    ):
+        raise ValueError("Interval arrays must contain only finite values")
+    if np.any(lower > median) or np.any(median > upper):
+        raise ValueError("Interval predictions must satisfy lower <= median <= upper")
+
+    covered = (actual_values >= lower) & (actual_values <= upper)
+    width = upper - lower
+    return {
+        "lower_quantile": float(lower_quantile),
+        "upper_quantile": float(upper_quantile),
+        "target_coverage": float(upper_quantile - lower_quantile),
+        "empirical_coverage": float(np.mean(covered)),
+        "lower_violation_rate": float(np.mean(actual_values < lower)),
+        "upper_violation_rate": float(np.mean(actual_values > upper)),
+        "mean_interval_width": float(np.mean(width)),
+        "median_interval_width": float(np.median(width)),
+        "median_prediction_mae": float(np.mean(np.abs(actual_values - median))),
+    }
+
+
+def build_error_slices(
+    holdout: pd.DataFrame,
+    predictions: dict[str, np.ndarray],
+) -> pd.DataFrame:
+    """Summarise out-of-time errors by key market and property segments."""
+    if holdout.empty:
+        raise ValueError("Cannot calculate error slices for an empty holdout")
+    actual = holdout["resale_price"].to_numpy(dtype="float64")
+    slice_data = pd.DataFrame(
+        {
+            "town": holdout["town"].astype("string").to_numpy(),
+            "flat_type": holdout["flat_type"].astype("string").to_numpy(),
+            "price_band": pd.cut(
+                actual,
+                bins=PRICE_BAND_EDGES,
+                labels=PRICE_BAND_LABELS,
+                right=False,
+            ),
+            "remaining_lease_band": pd.cut(
+                holdout["remaining_lease_years"].to_numpy(dtype="float64"),
+                bins=LEASE_BAND_EDGES,
+                labels=LEASE_BAND_LABELS,
+                right=False,
+            ),
+        }
+    )
+    records: list[dict[str, object]] = []
+    for model_name, predicted in predictions.items():
+        predicted_values = np.asarray(predicted, dtype="float64")
+        if len(predicted_values) != len(actual):
+            raise ValueError(
+                f"Prediction length for {model_name!r} does not match holdout"
+            )
+        for dimension in (
+            "town",
+            "flat_type",
+            "price_band",
+            "remaining_lease_band",
+        ):
+            grouped_indices = slice_data.groupby(
+                dimension,
+                observed=True,
+                sort=True,
+                dropna=False,
+            ).indices
+            for value, positions in grouped_indices.items():
+                position_array = np.asarray(positions, dtype="int64")
+                actual_slice = actual[position_array]
+                predicted_slice = predicted_values[position_array]
+                metrics = regression_metrics(actual_slice, predicted_slice)
+                records.append(
+                    {
+                        "model": model_name,
+                        "slice_dimension": dimension,
+                        "slice_value": str(value),
+                        "observations": len(position_array),
+                        **metrics,
+                        "mean_error": float(np.mean(predicted_slice - actual_slice)),
+                    }
+                )
+
+    return (
+        pd.DataFrame.from_records(records)
+        .sort_values(
+            ["model", "slice_dimension", "slice_value"],
+            kind="mergesort",
+        )
+        .reset_index(drop=True)
+    )
 
 
 def grouped_permutation_importance(
@@ -431,8 +828,9 @@ def evaluate_chronological_holdout(
     permutation_repeats: int = DEFAULT_PERMUTATION_REPEATS,
     importance_sample_size: int = DEFAULT_IMPORTANCE_SAMPLE_SIZE,
     random_seed: int = RANDOM_SEED,
+    interval_calibration_months: int = DEFAULT_INTERVAL_CALIBRATION_MONTHS,
 ) -> ModelEvaluation:
-    """Compare the hedonic model with a training-median holdout baseline."""
+    """Compare the hedonic model with global and segment-median baselines."""
     prepared = prepare_model_data(df)
     train, holdout, cutoff = chronological_holdout(prepared, holdout_months)
     origin = pd.Timestamp(train["month"].min())
@@ -443,11 +841,45 @@ def evaluate_chronological_holdout(
     actual = holdout["resale_price"].to_numpy(dtype="float64")
     baseline_price = float(train["resale_price"].median())
     baseline_prediction = np.full(len(holdout), baseline_price, dtype="float64")
+    segment_prediction, segment_metadata = segment_median_baseline(train, holdout)
+    recent_segment_prediction, recent_segment_metadata = segment_median_baseline(
+        train,
+        holdout,
+        lookback_months=12,
+    )
     model_prediction = model.predict_price(holdout)
-    metrics = {
-        "training_median_baseline": regression_metrics(actual, baseline_prediction),
-        "hedonic_ridge": regression_metrics(actual, model_prediction),
+
+    interval_model = fit_calibrated_interval_model(
+        train,
+        point_model=model,
+        ridge_alpha=ridge_alpha,
+        calibration_months=interval_calibration_months,
+    )
+    quantile_predictions = interval_model.predict_quantiles(holdout)
+    interval_metrics: dict[str, object] = {
+        **prediction_interval_metrics(
+            actual,
+            quantile_predictions,
+            lower_quantile=interval_model.lower_quantile,
+            upper_quantile=interval_model.upper_quantile,
+        ),
+        "median_quantile": interval_model.median_quantile,
+        "median_model": "hedonic_ridge",
+        **interval_model.calibration,
+        "test_rows": len(holdout),
     }
+
+    prediction_by_model = {
+        "training_median_baseline": baseline_prediction,
+        "town_flat_type_median_baseline": segment_prediction,
+        "prior_12m_town_flat_type_median_baseline": recent_segment_prediction,
+        "hedonic_ridge": model_prediction,
+    }
+    metrics = {
+        name: regression_metrics(actual, prediction)
+        for name, prediction in prediction_by_model.items()
+    }
+    error_slices = build_error_slices(holdout, prediction_by_model)
 
     importance = grouped_permutation_importance(
         model,
@@ -466,12 +898,125 @@ def evaluate_chronological_holdout(
         "training_rows": len(train),
         "holdout_rows": len(holdout),
         "baseline_training_median_price": baseline_price,
+        "town_flat_type_baseline": segment_metadata,
+        "prior_12m_town_flat_type_baseline": recent_segment_metadata,
     }
     return ModelEvaluation(
         model=model,
         metrics=metrics,
         permutation_importance=importance,
         split=split,
+        error_slices=error_slices,
+        interval_metrics=interval_metrics,
+    )
+
+
+def evaluate_rolling_backtests(
+    df: pd.DataFrame,
+    *,
+    test_months: int = DEFAULT_HOLDOUT_MONTHS,
+    max_splits: int = DEFAULT_BACKTEST_SPLITS,
+    min_train_months: int = DEFAULT_BACKTEST_MIN_TRAIN_MONTHS,
+    ridge_alpha: float = DEFAULT_RIDGE_ALPHA,
+    interval_calibration_months: int = DEFAULT_INTERVAL_CALIBRATION_MONTHS,
+) -> BacktestEvaluation:
+    """Evaluate models on several historical, expanding-window test periods."""
+    prepared = prepare_model_data(df)
+    splits = expanding_window_splits(
+        prepared,
+        test_months=test_months,
+        max_splits=max_splits,
+        min_train_months=min_train_months,
+    )
+    fold_records: list[dict[str, object]] = []
+    interval_records: list[dict[str, object]] = []
+
+    for fold_number, train, test, _ in splits:
+        origin = pd.Timestamp(train["month"].min())
+        train = add_trend_features(train, origin)
+        test = add_trend_features(test, origin)
+        actual = test["resale_price"].to_numpy(dtype="float64")
+
+        model = fit_hedonic_model(
+            train,
+            time_mode="trend",
+            ridge_alpha=ridge_alpha,
+        )
+        global_median = float(train["resale_price"].median())
+        global_prediction = np.full(len(test), global_median, dtype="float64")
+        segment_prediction, segment_metadata = segment_median_baseline(train, test)
+        recent_prediction, recent_metadata = segment_median_baseline(
+            train,
+            test,
+            lookback_months=12,
+        )
+        model_prediction = model.predict_price(test)
+
+        interval_model = fit_calibrated_interval_model(
+            train,
+            point_model=model,
+            ridge_alpha=ridge_alpha,
+            calibration_months=interval_calibration_months,
+        )
+        quantile_predictions = interval_model.predict_quantiles(test)
+        prediction_by_model = {
+            "training_median_baseline": global_prediction,
+            "town_flat_type_median_baseline": segment_prediction,
+            "prior_12m_town_flat_type_median_baseline": recent_prediction,
+            "hedonic_ridge": model_prediction,
+        }
+
+        fold_context: dict[str, object] = {
+            "fold": fold_number,
+            "training_start_month": pd.Timestamp(train["month"].min()).strftime(
+                "%Y-%m"
+            ),
+            "training_end_month": pd.Timestamp(train["month"].max()).strftime("%Y-%m"),
+            "test_start_month": pd.Timestamp(test["month"].min()).strftime("%Y-%m"),
+            "test_end_month": pd.Timestamp(test["month"].max()).strftime("%Y-%m"),
+            "training_rows": len(train),
+            "test_rows": len(test),
+        }
+        fallback_by_model = {
+            "town_flat_type_median_baseline": segment_metadata["fallback_counts"],
+            "prior_12m_town_flat_type_median_baseline": recent_metadata[
+                "fallback_counts"
+            ],
+        }
+        for model_name, prediction in prediction_by_model.items():
+            fallback_counts = fallback_by_model.get(model_name, {})
+            fold_records.append(
+                {
+                    **fold_context,
+                    "model": model_name,
+                    **regression_metrics(actual, prediction),
+                    "exact_segment_rows": int(
+                        fallback_counts.get("town_x_flat_type", 0)
+                    ),
+                    "town_fallback_rows": int(fallback_counts.get("town", 0)),
+                    "flat_type_fallback_rows": int(fallback_counts.get("flat_type", 0)),
+                    "global_fallback_rows": int(fallback_counts.get("global", 0)),
+                }
+            )
+
+        interval_records.append(
+            {
+                **fold_context,
+                "median_quantile": interval_model.median_quantile,
+                "median_model": "hedonic_ridge",
+                **interval_model.calibration,
+                **prediction_interval_metrics(
+                    actual,
+                    quantile_predictions,
+                    lower_quantile=interval_model.lower_quantile,
+                    upper_quantile=interval_model.upper_quantile,
+                ),
+            }
+        )
+
+    return BacktestEvaluation(
+        fold_metrics=pd.DataFrame.from_records(fold_records),
+        interval_metrics=pd.DataFrame.from_records(interval_records),
     )
 
 
@@ -738,6 +1283,10 @@ def run_analysis(
     random_seed: int = RANDOM_SEED,
     as_of: str | pd.Timestamp | None = None,
     index_ridge_alpha: float = DEFAULT_INDEX_RIDGE_ALPHA,
+    backtest_splits: int = DEFAULT_BACKTEST_SPLITS,
+    backtest_min_train_months: int = DEFAULT_BACKTEST_MIN_TRAIN_MONTHS,
+    backtest_test_months: int | None = None,
+    interval_calibration_months: int = DEFAULT_INTERVAL_CALIBRATION_MONTHS,
 ) -> dict[str, object]:
     """Run modelling, save reproducible reports, and return the summary."""
     source = read_model_input(input_path)
@@ -758,7 +1307,27 @@ def run_analysis(
         permutation_repeats=permutation_repeats,
         importance_sample_size=importance_sample_size,
         random_seed=random_seed,
+        interval_calibration_months=interval_calibration_months,
     )
+    resolved_backtest_months = (
+        holdout_months if backtest_test_months is None else backtest_test_months
+    )
+    analysis_month_count = (
+        pd.to_datetime(analysis_source["month"]).dt.to_period("M").nunique()
+    )
+    effective_min_train_months = min(
+        backtest_min_train_months,
+        analysis_month_count - resolved_backtest_months,
+    )
+    backtests = evaluate_rolling_backtests(
+        analysis_source,
+        test_months=resolved_backtest_months,
+        max_splits=backtest_splits,
+        min_train_months=effective_min_train_months,
+        ridge_alpha=ridge_alpha,
+        interval_calibration_months=interval_calibration_months,
+    )
+
     index, _ = derive_quality_adjusted_index(
         analysis_source,
         ridge_alpha=index_ridge_alpha,
@@ -769,6 +1338,9 @@ def run_analysis(
     metrics_path = reports_dir / "price_model_metrics.json"
     importance_path = reports_dir / "price_model_permutation_importance.csv"
     index_path = reports_dir / "quality_adjusted_price_index.csv"
+    backtest_path = reports_dir / "price_model_backtests.csv"
+    error_slices_path = reports_dir / "price_model_error_slices.csv"
+    interval_metrics_path = reports_dir / "price_model_interval_metrics.csv"
     figure_path = images_dir / "raw_vs_quality_adjusted_price_index.png"
 
     _write_csv_atomic(
@@ -784,6 +1356,25 @@ def run_analysis(
         index=False,
         float_format="%.6f",
     )
+    _write_csv_atomic(
+        backtests.fold_metrics,
+        backtest_path,
+        index=False,
+        float_format="%.6f",
+    )
+    _write_csv_atomic(
+        evaluation.error_slices,
+        error_slices_path,
+        index=False,
+        float_format="%.6f",
+    )
+    _write_csv_atomic(
+        backtests.interval_metrics,
+        interval_metrics_path,
+        index=False,
+        float_format="%.6f",
+    )
+
     temporary_figure = _temporary_output_path(figure_path)
     try:
         _write_index_plot(index, temporary_figure, completeness)
@@ -792,10 +1383,38 @@ def run_analysis(
         temporary_figure.unlink(missing_ok=True)
 
     baseline_mae = evaluation.metrics["training_median_baseline"]["mae"]
+    recent_segment_baseline_mae = evaluation.metrics[
+        "prior_12m_town_flat_type_median_baseline"
+    ]["mae"]
     model_mae = evaluation.metrics["hedonic_ridge"]["mae"]
     mae_improvement_pct = (
         (baseline_mae - model_mae) / baseline_mae * 100.0 if baseline_mae else 0.0
     )
+    segment_mae_improvement_pct = (
+        (recent_segment_baseline_mae - model_mae) / recent_segment_baseline_mae * 100.0
+        if recent_segment_baseline_mae
+        else 0.0
+    )
+
+    rolling_metric_summary: dict[str, dict[str, float | int]] = {}
+    for model_name, model_results in backtests.fold_metrics.groupby(
+        "model",
+        sort=True,
+    ):
+        rolling_metric_summary[str(model_name)] = {
+            "folds": int(len(model_results)),
+            "mean_mae": float(model_results["mae"].mean()),
+            "mean_median_absolute_error": float(
+                model_results["median_absolute_error"].mean()
+            ),
+            "mean_p90_absolute_error": float(
+                model_results["p90_absolute_error"].mean()
+            ),
+            "mean_rmse": float(model_results["rmse"].mean()),
+            "mean_r2": float(model_results["r2"].mean()),
+            "mean_mape_pct": float(model_results["mape_pct"].mean()),
+        }
+
     summary: dict[str, object] = {
         "input_provenance": {
             "path": _portable_output_path(input_path),
@@ -827,6 +1446,26 @@ def run_analysis(
             "evaluation_time_controls": "linear month trend plus annual seasonality",
             "index_time_controls": "transaction-month fixed effects",
             "retransformation": "Duan smearing factor estimated on training residuals",
+            "baselines": (
+                "Global training median, all-history town x flat-type medians, "
+                "and prior-12-month town x flat-type medians with town, flat-type, "
+                "then global fallback levels."
+            ),
+            "rolling_backtests": (
+                "Non-overlapping expanding-window folds ending at the latest "
+                "complete analysis month."
+            ),
+            "prediction_intervals": (
+                "Centered 10th and 90th percentile log-residual tail spreads "
+                "calibrated on the latest pre-test training months, with the "
+                "50th percentile anchored to the full-training Ridge estimate. "
+                "These are empirical uncertainty ranges, not formal valuations."
+            ),
+            "error_slices": (
+                "Out-of-time MAE, median and 90th-percentile absolute error, "
+                "RMSE, R-squared, MAPE and mean error by town, flat type, "
+                "observed price band and remaining-lease band."
+            ),
             "permutation_importance": (
                 "Mean holdout metric degradation after grouped shuffling. "
                 "A negative value means shuffling did not worsen that metric, "
@@ -843,6 +1482,23 @@ def run_analysis(
         "split": evaluation.split,
         "holdout_metrics": evaluation.metrics,
         "holdout_mae_improvement_vs_baseline_pct": mae_improvement_pct,
+        "holdout_mae_improvement_vs_prior_12m_segment_baseline_pct": (
+            segment_mae_improvement_pct
+        ),
+        "holdout_prediction_interval": evaluation.interval_metrics,
+        "rolling_backtests": {
+            "folds": int(backtests.fold_metrics["fold"].nunique()),
+            "test_months_per_fold": resolved_backtest_months,
+            "first_test_month": str(backtests.fold_metrics["test_start_month"].min()),
+            "latest_test_month": str(backtests.fold_metrics["test_end_month"].max()),
+            "metrics_by_model": rolling_metric_summary,
+            "mean_empirical_interval_coverage": float(
+                backtests.interval_metrics["empirical_coverage"].mean()
+            ),
+            "target_interval_coverage": float(
+                backtests.interval_metrics["target_coverage"].iloc[0]
+            ),
+        },
         "index_summary": {
             "base_month": pd.Timestamp(index["month"].iloc[0]).strftime("%Y-%m"),
             "latest_month": pd.Timestamp(index["month"].iloc[-1]).strftime("%Y-%m"),
@@ -861,11 +1517,17 @@ def run_analysis(
             "metrics": _portable_output_path(metrics_path),
             "permutation_importance": _portable_output_path(importance_path),
             "quality_adjusted_index": _portable_output_path(index_path),
+            "rolling_backtests": _portable_output_path(backtest_path),
+            "error_slices": _portable_output_path(error_slices_path),
+            "interval_metrics": _portable_output_path(interval_metrics_path),
             "comparison_chart": _portable_output_path(figure_path),
         },
         "output_sha256": {
             "permutation_importance": file_sha256(importance_path),
             "quality_adjusted_index": file_sha256(index_path),
+            "rolling_backtests": file_sha256(backtest_path),
+            "error_slices": file_sha256(error_slices_path),
+            "interval_metrics": file_sha256(interval_metrics_path),
             "comparison_chart": file_sha256(figure_path),
         },
     }
@@ -937,6 +1599,30 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_IMPORTANCE_SAMPLE_SIZE,
         help="Maximum holdout rows used for permutation importance",
     )
+    parser.add_argument(
+        "--backtest-splits",
+        type=int,
+        default=DEFAULT_BACKTEST_SPLITS,
+        help="Maximum number of historical expanding-window folds",
+    )
+    parser.add_argument(
+        "--backtest-min-train-months",
+        type=int,
+        default=DEFAULT_BACKTEST_MIN_TRAIN_MONTHS,
+        help="Preferred minimum training history for rolling backtests",
+    )
+    parser.add_argument(
+        "--backtest-test-months",
+        type=int,
+        help="Months per backtest fold; defaults to --holdout-months",
+    )
+    parser.add_argument(
+        "--interval-calibration-months",
+        type=int,
+        default=DEFAULT_INTERVAL_CALIBRATION_MONTHS,
+        help="Latest pre-test training months used for residual-quantile calibration",
+    )
+
     return parser.parse_args()
 
 
@@ -953,6 +1639,10 @@ def main() -> None:
         importance_sample_size=args.importance_sample_size,
         as_of=args.as_of,
         index_ridge_alpha=args.index_ridge_alpha,
+        backtest_splits=args.backtest_splits,
+        backtest_min_train_months=args.backtest_min_train_months,
+        backtest_test_months=args.backtest_test_months,
+        interval_calibration_months=args.interval_calibration_months,
     )
     baseline = summary["holdout_metrics"]["training_median_baseline"]
     model = summary["holdout_metrics"]["hedonic_ridge"]

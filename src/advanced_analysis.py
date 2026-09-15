@@ -25,6 +25,11 @@ import pandas as pd
 import requests
 from matplotlib.ticker import FuncFormatter, PercentFormatter
 
+if __package__:
+    from .http_retry import get_with_retry
+else:
+    from http_retry import get_with_retry
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -615,7 +620,8 @@ def download_rpi_dataset(
     offset = 0
     try:
         while True:
-            response = client.get(
+            response = get_with_retry(
+                client,
                 RPI_API_URL,
                 params={
                     "resource_id": RPI_DATASET_ID,

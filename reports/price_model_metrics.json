@@ -1,16 +1,60 @@
 {
   "holdout_mae_improvement_vs_baseline_pct": 74.38193588132968,
+  "holdout_mae_improvement_vs_prior_12m_segment_baseline_pct": 35.469684587191516,
   "holdout_metrics": {
     "hedonic_ridge": {
       "mae": 52844.01424584842,
+      "mape_pct": 8.225325412244654,
+      "median_absolute_error": 41608.94913639099,
+      "p90_absolute_error": 111584.41935878815,
       "r2": 0.8933437473797268,
       "rmse": 69634.98727587244
     },
+    "prior_12m_town_flat_type_median_baseline": {
+      "mae": 81890.21533181523,
+      "mape_pct": 11.916359633944898,
+      "median_absolute_error": 52000.0,
+      "p90_absolute_error": 190888.0,
+      "r2": 0.661323816413059,
+      "rmse": 124087.10970012895
+    },
+    "town_flat_type_median_baseline": {
+      "mae": 161755.22611906313,
+      "mape_pct": 22.6348024799938,
+      "median_absolute_error": 135000.0,
+      "p90_absolute_error": 321000.0,
+      "r2": 0.11228554235591537,
+      "rmse": 200895.85987701753
+    },
     "training_median_baseline": {
       "mae": 206276.3759238777,
+      "mape_pct": 27.551544164346573,
+      "median_absolute_error": 150888.0,
+      "p90_absolute_error": 462000.0,
       "r2": -0.6539923712419415,
       "rmse": 274221.24061400816
     }
+  },
+  "holdout_prediction_interval": {
+    "calibration_end_month": "2025-08",
+    "calibration_median_log_residual": 0.035968736316936756,
+    "calibration_months": 6,
+    "calibration_rows": 13487,
+    "calibration_start_month": "2025-03",
+    "development_rows": 201386,
+    "empirical_coverage": 0.7504472999349382,
+    "interval_center_log_offset": 0.006219809566570916,
+    "lower_quantile": 0.1,
+    "lower_violation_rate": 0.17176317501626545,
+    "mean_interval_width": 152722.02191774396,
+    "median_interval_width": 148135.73171107925,
+    "median_model": "hedonic_ridge",
+    "median_prediction_mae": 52844.01424584855,
+    "median_quantile": 0.5,
+    "target_coverage": 0.8,
+    "test_rows": 24592,
+    "upper_quantile": 0.9,
+    "upper_violation_rate": 0.07778952504879635
   },
   "index_summary": {
     "base_month": "2017-01",
@@ -36,6 +80,8 @@
     "source_rows": 239977
   },
   "methodology": {
+    "baselines": "Global training median, all-history town x flat-type medians, and prior-12-month town x flat-type medians with town, flat-type, then global fallback levels.",
+    "error_slices": "Out-of-time MAE, median and 90th-percentile absolute error, RMSE, R-squared, MAPE and mean error by town, flat type, observed price band and remaining-lease band.",
     "estimator": "ridge-regularized hedonic regression for holdout prediction",
     "evaluation_time_controls": "linear month trend plus annual seasonality",
     "index_estimator": "unpenalized hedonic linear regression with transaction-month fixed effects",
@@ -43,6 +89,7 @@
     "index_time_controls": "transaction-month fixed effects",
     "interpretation": "Descriptive associations and a transaction-mix-adjusted trend; not causal effects or formal property valuations.",
     "permutation_importance": "Mean holdout metric degradation after grouped shuffling. A negative value means shuffling did not worsen that metric, often because predictors overlap.",
+    "prediction_intervals": "Centered 10th and 90th percentile log-residual tail spreads calibrated on the latest pre-test training months, with the 50th percentile anchored to the full-training Ridge estimate. These are empirical uncertainty ranges, not formal valuations.",
     "quality_controls": [
       "floor area (log quadratic)",
       "remaining lease (quadratic)",
@@ -54,18 +101,71 @@
     "random_seed": 42,
     "retransformation": "Duan smearing factor estimated on training residuals",
     "ridge_alpha": 1.0,
+    "rolling_backtests": "Non-overlapping expanding-window folds ending at the latest complete analysis month.",
     "target": "natural logarithm of resale_price"
   },
   "output_sha256": {
     "comparison_chart": "a887c3c08c6ff4e209f3161569124f99eef2795eb5c8e6e927101fdde1d1dcae",
+    "error_slices": "a95ed6ba75d8afda4ac5bd38489b13b4dfdda404cee032118538dced6715acf4",
+    "interval_metrics": "3c6307082c34be0c2ddbd3bca482af1a6f16a2a82ae2086b8c728e22c7baf96c",
     "permutation_importance": "6fa29fffb94bb7a6ac1322d8c0dd85fca8d6a7e9a68e99b392a087bd3002b7c4",
-    "quality_adjusted_index": "563d670177d9ded02b227849c526aebcf45cd0a1acf1e5865426a2c4a31c0f8a"
+    "quality_adjusted_index": "563d670177d9ded02b227849c526aebcf45cd0a1acf1e5865426a2c4a31c0f8a",
+    "rolling_backtests": "cefe0311ff8c55068274c8b73e4fb98f97987a3f5dffada973d41ec34985bd27"
   },
   "outputs": {
     "comparison_chart": "images/raw_vs_quality_adjusted_price_index.png",
+    "error_slices": "reports/price_model_error_slices.csv",
+    "interval_metrics": "reports/price_model_interval_metrics.csv",
     "metrics": "reports/price_model_metrics.json",
     "permutation_importance": "reports/price_model_permutation_importance.csv",
-    "quality_adjusted_index": "reports/quality_adjusted_price_index.csv"
+    "quality_adjusted_index": "reports/quality_adjusted_price_index.csv",
+    "rolling_backtests": "reports/price_model_backtests.csv"
+  },
+  "rolling_backtests": {
+    "first_test_month": "2022-09",
+    "folds": 4,
+    "latest_test_month": "2026-08",
+    "mean_empirical_interval_coverage": 0.7072038455737625,
+    "metrics_by_model": {
+      "hedonic_ridge": {
+        "folds": 4,
+        "mean_mae": 52347.47521289857,
+        "mean_mape_pct": 8.53705588141414,
+        "mean_median_absolute_error": 42296.7986267574,
+        "mean_p90_absolute_error": 107902.39846946442,
+        "mean_r2": 0.8689639931269169,
+        "mean_rmse": 68624.72265112074
+      },
+      "prior_12m_town_flat_type_median_baseline": {
+        "folds": 4,
+        "mean_mae": 79286.68572067677,
+        "mean_mape_pct": 11.987381115345261,
+        "mean_median_absolute_error": 50889.0,
+        "mean_p90_absolute_error": 188844.0,
+        "mean_r2": 0.6253796410021362,
+        "mean_rmse": 117151.06661685828
+      },
+      "town_flat_type_median_baseline": {
+        "folds": 4,
+        "mean_mae": 149805.15918348896,
+        "mean_mape_pct": 22.806175322500117,
+        "mean_median_absolute_error": 128222.0,
+        "mean_p90_absolute_error": 286972.0,
+        "mean_r2": 0.10559602141205837,
+        "mean_rmse": 181640.05886822403
+      },
+      "training_median_baseline": {
+        "folds": 4,
+        "mean_mae": 185522.31872182837,
+        "mean_mape_pct": 26.554489446604308,
+        "mean_median_absolute_error": 138472.0,
+        "mean_p90_absolute_error": 416750.0,
+        "mean_r2": -0.6383433411450588,
+        "mean_rmse": 245858.9463709438
+      }
+    },
+    "target_interval_coverage": 0.8,
+    "test_months_per_fold": 12
   },
   "split": {
     "baseline_training_median_price": 488000.0,
@@ -74,6 +174,26 @@
     "holdout_months": 12,
     "holdout_rows": 24592,
     "holdout_start_month": "2025-09",
+    "prior_12m_town_flat_type_baseline": {
+      "fallback_counts": {
+        "town_x_flat_type": 24592
+      },
+      "global_fallback_median_price": 620000.0,
+      "lookback_months": 12,
+      "reference_end_month": "2025-08",
+      "reference_rows": 26275,
+      "reference_start_month": "2024-09"
+    },
+    "town_flat_type_baseline": {
+      "fallback_counts": {
+        "town_x_flat_type": 24592
+      },
+      "global_fallback_median_price": 488000.0,
+      "lookback_months": null,
+      "reference_end_month": "2025-08",
+      "reference_rows": 214873,
+      "reference_start_month": "2017-01"
+    },
     "training_end_month": "2025-08",
     "training_rows": 214873,
     "training_start_month": "2017-01"

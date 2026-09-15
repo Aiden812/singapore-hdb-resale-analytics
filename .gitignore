@@ -21,6 +21,7 @@ powerbi/*
 !data/raw/hdb_resale_rpi.csv
 !data/processed/.gitkeep
 !data/processed/hdb_resale_clean.parquet
+!data/processed/hdb_resale_enriched.parquet
 !data/processed/snapshot_metadata.json
 !database/.gitkeep
 !database/README.md

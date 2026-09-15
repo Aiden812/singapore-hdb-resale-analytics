@@ -10,6 +10,11 @@ from pathlib import Path
 
 import requests
 
+if __package__:
+    from .http_retry import get_with_retry
+else:
+    from http_retry import get_with_retry
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "data" / "raw" / "hdb_resale_raw.csv"
 DATASET_ID = "d_8b84c4ee58e3cfc0ece0d773c8ca6abc"
@@ -44,14 +49,17 @@ def request_download_url(
 ) -> str:
     """Initiate a dataset export and poll until its URL is available."""
     dataset_url = f"{API_ROOT}/{DATASET_ID}"
-    session.get(
+    initiate_response = get_with_retry(
+        session,
         f"{dataset_url}/initiate-download",
         headers=api_headers(),
         timeout=60,
-    ).raise_for_status()
+    )
+    initiate_response.raise_for_status()
 
     for attempt in range(1, max_attempts + 1):
-        response = session.get(
+        response = get_with_retry(
+            session,
             f"{dataset_url}/poll-download",
             headers=api_headers(),
             timeout=60,
@@ -103,7 +111,13 @@ def download_dataset(output_path: Path, *, force: bool = False) -> int:
                 poll_interval=15,
                 max_attempts=12,
             )
-            with session.get(download_url, stream=True, timeout=120) as response:
+            # The export URL is presigned; do not forward data.gov.sg API headers.
+            with get_with_retry(
+                session,
+                download_url,
+                stream=True,
+                timeout=120,
+            ) as response:
                 response.raise_for_status()
                 with temporary_path.open("wb") as output_file:
                     for chunk in response.iter_content(chunk_size=1024 * 1024):
