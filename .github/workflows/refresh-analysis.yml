@@ -1,0 +1,60 @@
+name: Refresh analysis snapshot
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Download and prepare current data
+        run: |
+          python src/download_data.py --force
+          python src/clean_data.py
+          python src/build_database.py
+
+      - name: Generate advanced reports and model
+        run: |
+          python src/advanced_analysis.py --refresh-rpi
+          python src/model_price.py --input data/processed/hdb_resale_clean.parquet
+
+      - name: Build and execute notebooks
+        working-directory: notebooks
+        run: |
+          python ../scripts/upgrade_hdb_notebook.py
+          python ../scripts/build_portfolio_notebook.py
+          jupyter nbconvert --to notebook --execute --inplace hdb_analysis.ipynb --ExecutePreprocessor.timeout=900
+          jupyter nbconvert --to notebook --execute --inplace portfolio_analysis.ipynb --ExecutePreprocessor.timeout=900
+
+      - name: Verify refreshed artifacts
+        run: python -m unittest discover -s tests -v
+
+      - name: Upload review bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: hdb-analysis-snapshot
+          if-no-files-found: error
+          path: |
+            data/processed/hdb_resale_clean.parquet
+            data/processed/snapshot_metadata.json
+            data/raw/hdb_resale_rpi.csv
+            images/*.png
+            notebooks/*.ipynb
+            reports/*

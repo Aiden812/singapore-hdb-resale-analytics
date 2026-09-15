@@ -1,0 +1,86 @@
+{
+  "analysis_type": "descriptive_and_robustness",
+  "caveats": [
+    "Results are descriptive and unadjusted. Changes can reflect the mix of towns, flat types, sizes, leases and storeys sold; they do not identify causal effects.",
+    "Fully identical rows cannot be confirmed as errors because the source has no transaction identifier or unit number. Removal is shown only as a sensitivity check.",
+    "The raw-median series is composition-sensitive and is not equivalent to the official HDB Resale Price Index. Rebasing permits a visual comparison of movement, not a claim that the measures are interchangeable."
+  ],
+  "duplicate_sensitivity_overall": {
+    "median_difference_pct": 0.0,
+    "median_difference_sgd": 0.0,
+    "median_with_duplicates": 503000.0,
+    "median_without_duplicates": 503000.0,
+    "rows_removed": 318,
+    "rows_with_duplicates": 239977,
+    "rows_without_duplicates": 239659
+  },
+  "official_rpi": {
+    "api_url": "https://data.gov.sg/api/action/datastore_search",
+    "base_quarter": "2017-Q1",
+    "benchmark_first_quarter": "2017-Q1",
+    "benchmark_latest_quarter": "2026-Q2",
+    "dataset_id": "d_14f63e595975691e7c24a27ae4c07c79",
+    "first_quarter": "1990-Q1",
+    "latest_quarter": "2026-Q2",
+    "local_snapshot": "data/raw/hdb_resale_rpi.csv",
+    "local_snapshot_available": true,
+    "sha256": "f37b15eb495b3230f3f3231367f7661a7db6b8f7df29ef29449f0d6bc52b3626",
+    "source_url": "https://data.gov.sg/datasets/d_14f63e595975691e7c24a27ae4c07c79/view"
+  },
+  "outputs": {
+    "plots": {
+      "annual_price_distribution": "images/annual_price_distribution.png",
+      "million_dollar_share": "images/million_dollar_share_by_year.png",
+      "remaining_lease": "images/remaining_lease_price_bands.png",
+      "rpi_benchmark": "images/raw_median_vs_official_rpi.png",
+      "town_growth": "images/town_growth_with_sample_guard.png"
+    },
+    "tables": {
+      "annual_price_quantiles": "reports/annual_price_quantiles.csv",
+      "duplicate_sensitivity": "reports/duplicate_sensitivity.csv",
+      "million_dollar_share_by_town": "reports/million_dollar_share_by_town.csv",
+      "million_dollar_share_by_town_year": "reports/million_dollar_share_by_town_year.csv",
+      "million_dollar_share_by_year": "reports/million_dollar_share_by_year.csv",
+      "python_sql_reconciliation": "reports/python_sql_reconciliation.csv",
+      "quarterly_rpi_benchmark": "reports/quarterly_rpi_benchmark.csv",
+      "remaining_lease_bands": "reports/remaining_lease_bands.csv",
+      "town_endpoint_growth": "reports/town_endpoint_growth.csv"
+    }
+  },
+  "parameters": {
+    "million_dollar_threshold_sgd": 1000000.0,
+    "minimum_town_endpoint_sample": 100,
+    "remaining_lease_bin_years": 5,
+    "sql_match_tolerance_sgd": 0.01
+  },
+  "partial_month_disclosure": {
+    "as_of_source": "snapshot_metadata.json:source_modified_at_utc",
+    "definition": "A transaction month matching the snapshot as-of month is provisional because that calendar month was not complete when the file was observed.",
+    "latest_month": "2026-09",
+    "latest_month_is_provisional": true,
+    "provisional_rows": 512,
+    "snapshot_as_of_singapore": "2026-09-08T11:37:54.952169+08:00"
+  },
+  "partial_year_disclosure": {
+    "definition": "A complete year contains at least one record in all 12 month labels.",
+    "incomplete_years": [
+      {
+        "latest_month": "2026-09",
+        "months_observed": 9,
+        "year": 2026
+      }
+    ]
+  },
+  "sql_reconciliation": {
+    "all_years_match": true,
+    "database": "database/hdb_resale.db",
+    "performed": true
+  },
+  "transaction_source": {
+    "first_month": "2017-01",
+    "latest_month": "2026-09",
+    "path": "data/processed/hdb_resale_clean.csv",
+    "row_count": 239977,
+    "sha256": "ab576d05804ed2bdc8f9e156e2a95c0775a551ac22f77a77641c130803591bfb"
+  }
+}

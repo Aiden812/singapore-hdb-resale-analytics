@@ -1,0 +1,81 @@
+{
+  "holdout_mae_improvement_vs_baseline_pct": 74.38193588132968,
+  "holdout_metrics": {
+    "hedonic_ridge": {
+      "mae": 52844.01424584842,
+      "r2": 0.8933437473797268,
+      "rmse": 69634.98727587244
+    },
+    "training_median_baseline": {
+      "mae": 206276.3759238777,
+      "r2": -0.6539923712419415,
+      "rmse": 274221.24061400816
+    }
+  },
+  "index_summary": {
+    "base_month": "2017-01",
+    "latest_month": "2026-08",
+    "quality_adjusted_change_from_base_pct": 56.603603640169354,
+    "raw_change_from_base_pct": 56.79012345679013,
+    "raw_minus_adjusted_change_percentage_points": 0.18651981662077333
+  },
+  "input_provenance": {
+    "analysis_latest_month": "2026-08",
+    "analysis_rows": 239465,
+    "as_of_source": "snapshot_metadata.json:source_modified_at_utc",
+    "excluded_month": "2026-09",
+    "excluded_rows": 512,
+    "path": "data/processed/hdb_resale_clean.parquet",
+    "provisional_latest_month_excluded": true,
+    "sha256": "dc1a9a47f28f8b5cb90e0f7f8cc702e14f1e1f9f9135ea5a55cb8ce6820f5ed5",
+    "snapshot_as_of_singapore": "2026-09-08T11:37:54.952169",
+    "source_latest_month": "2026-09",
+    "source_latest_month_rows": 512,
+    "source_month_max": "2026-09",
+    "source_month_min": "2017-01",
+    "source_rows": 239977
+  },
+  "methodology": {
+    "estimator": "ridge-regularized hedonic regression for holdout prediction",
+    "evaluation_time_controls": "linear month trend plus annual seasonality",
+    "index_estimator": "unpenalized hedonic linear regression with transaction-month fixed effects",
+    "index_ridge_alpha": 0.0,
+    "index_time_controls": "transaction-month fixed effects",
+    "interpretation": "Descriptive associations and a transaction-mix-adjusted trend; not causal effects or formal property valuations.",
+    "permutation_importance": "Mean holdout metric degradation after grouped shuffling. A negative value means shuffling did not worsen that metric, often because predictors overlap.",
+    "quality_controls": [
+      "floor area (log quadratic)",
+      "remaining lease (quadratic)",
+      "storey midpoint (quadratic)",
+      "town",
+      "flat type",
+      "flat model"
+    ],
+    "random_seed": 42,
+    "retransformation": "Duan smearing factor estimated on training residuals",
+    "ridge_alpha": 1.0,
+    "target": "natural logarithm of resale_price"
+  },
+  "output_sha256": {
+    "comparison_chart": "a887c3c08c6ff4e209f3161569124f99eef2795eb5c8e6e927101fdde1d1dcae",
+    "permutation_importance": "6fa29fffb94bb7a6ac1322d8c0dd85fca8d6a7e9a68e99b392a087bd3002b7c4",
+    "quality_adjusted_index": "563d670177d9ded02b227849c526aebcf45cd0a1acf1e5865426a2c4a31c0f8a"
+  },
+  "outputs": {
+    "comparison_chart": "images/raw_vs_quality_adjusted_price_index.png",
+    "metrics": "reports/price_model_metrics.json",
+    "permutation_importance": "reports/price_model_permutation_importance.csv",
+    "quality_adjusted_index": "reports/quality_adjusted_price_index.csv"
+  },
+  "split": {
+    "baseline_training_median_price": 488000.0,
+    "cutoff_month": "2025-09",
+    "holdout_end_month": "2026-08",
+    "holdout_months": 12,
+    "holdout_rows": 24592,
+    "holdout_start_month": "2025-09",
+    "training_end_month": "2025-08",
+    "training_rows": 214873,
+    "training_start_month": "2017-01"
+  }
+}

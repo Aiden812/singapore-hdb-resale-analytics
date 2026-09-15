@@ -4,6 +4,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.env
+.streamlit/secrets.toml
 
 # Jupyter
 .ipynb_checkpoints/
@@ -16,9 +18,14 @@ powerbi/*
 
 # Keep otherwise-empty project directories in Git
 !data/raw/.gitkeep
+!data/raw/hdb_resale_rpi.csv
 !data/processed/.gitkeep
+!data/processed/hdb_resale_clean.parquet
+!data/processed/snapshot_metadata.json
 !database/.gitkeep
+!database/README.md
 !powerbi/.gitkeep
+!powerbi/README.md
 
 # Editor and operating-system files
 .vscode/
