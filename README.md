@@ -26,7 +26,7 @@ Streamlit dashboard.
 - **Portfolio interface:** a five-tab Streamlit app includes filters, sample-size
   warnings, distributions, market profiles and the raw-versus-adjusted result.
 - **Engineering safeguards:** unit tests, a real-data app smoke test, linting,
-  CI on Python 3.11/3.12 and a manual refresh workflow protect the project.
+  CI on Python 3.12 and a manual refresh workflow protect the project.
 
 ## Current snapshot: key results
 
@@ -222,7 +222,7 @@ validation, SQL execution and indexes, RPI normalisation, chronological splits,
 model determinism, provisional-month handling, report hashes, notebook
 execution and a real Streamlit render.
 
-GitHub Actions runs the checks on Python 3.11 and 3.12. The separate **Refresh
+GitHub Actions runs the checks on Python 3.12. The separate **Refresh
 analysis snapshot** workflow downloads current data, rebuilds every artifact,
 executes both notebooks and uploads a review bundle; it does not silently commit
 new data.

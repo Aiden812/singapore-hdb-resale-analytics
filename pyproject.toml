@@ -7,7 +7,7 @@ name = "singapore-hdb-resale-analytics"
 version = "0.1.0"
 description = "Reproducible analytics for Singapore HDB resale transactions"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "matplotlib==3.11.1",
     "numpy==2.5.2",
@@ -29,7 +29,7 @@ include = ["src*"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
