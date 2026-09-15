@@ -18,8 +18,10 @@ from plotly.subplots import make_subplots
 from src.dashboard_data import (
     DEFAULT_DATA_PATH,
     DEFAULT_PARQUET_PATH,
+    SNAPSHOT_STALE_AFTER_DAYS,
     DashboardDataError,
     annual_trend,
+    assess_snapshot_freshness,
     binned_price_profile,
     coverage_by_year,
     filter_transactions,
@@ -160,6 +162,17 @@ def enrichment_metadata() -> dict[str, object] | None:
     return metadata if isinstance(metadata, dict) else None
 
 
+def tracked_snapshot_metadata() -> dict[str, object] | None:
+    """Return the repository snapshot manifest when it is readable."""
+    if not SNAPSHOT_METADATA_PATH.is_file():
+        return None
+    try:
+        metadata = json.loads(SNAPSHOT_METADATA_PATH.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return metadata if isinstance(metadata, dict) else None
+
+
 def default_enriched_snapshot_is_verified() -> bool:
     """Require matching file hash and row count before preferring enrichment."""
     metadata = enrichment_metadata()
@@ -169,9 +182,8 @@ def default_enriched_snapshot_is_verified() -> bool:
     output = metadata.get("output", {})
     if not isinstance(enrichment_input, dict) or not isinstance(output, dict):
         return False
-    try:
-        snapshot = json.loads(SNAPSHOT_METADATA_PATH.read_text(encoding="utf-8"))
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    snapshot = tracked_snapshot_metadata()
+    if snapshot is None:
         return False
     clean_hashes = {
         value
@@ -1072,6 +1084,26 @@ try:
 except DashboardDataError as exc:
     show_data_error(str(exc))
 
+snapshot_freshness = None
+tracked_snapshot = tracked_snapshot_metadata()
+if uploaded_snapshot is None and tracked_snapshot is not None:
+    equivalent_hashes: tuple[str, ...] = ()
+    if default_enriched_snapshot_is_verified():
+        enrichment = enrichment_metadata() or {}
+        enrichment_output = enrichment.get("output", {})
+        enriched_hash = (
+            enrichment_output.get("sha256")
+            if isinstance(enrichment_output, dict)
+            else None
+        )
+        if isinstance(enriched_hash, str):
+            equivalent_hashes = (enriched_hash,)
+    snapshot_freshness = assess_snapshot_freshness(
+        tracked_snapshot,
+        source_sha256,
+        equivalent_hashes=equivalent_hashes,
+    )
+
 all_years = sorted(int(year) for year in transactions["year"].unique())
 all_towns = sorted(str(town) for town in transactions["town"].dropna().unique())
 all_flat_types = sorted(
@@ -1163,14 +1195,34 @@ else:
     )
 
 escaped_source = html.escape(source_label)
+freshness_strip = ""
+if snapshot_freshness is not None:
+    observed_at = snapshot_freshness.observed_at_sgt
+    freshness_strip = (
+        f"<span>•</span><span>Observed {observed_at.day} "
+        f"{observed_at:%b %Y} SGT</span><span>•</span>"
+        f"<span>Age {snapshot_freshness.age_days} calendar days</span>"
+    )
 st.markdown(
     (
         '<div class="source-strip"><span class="source-pill">Data loaded</span>'
         f"<span>{escaped_source}</span><span>•</span>"
-        f"<span>Filtered through {filtered['month'].max():%b %Y}</span></div>"
+        f"<span>Filtered through {filtered['month'].max():%b %Y}</span>"
+        f"{freshness_strip}</div>"
     ),
     unsafe_allow_html=True,
 )
+
+if snapshot_freshness is not None and snapshot_freshness.is_stale:
+    observed_at = snapshot_freshness.observed_at_sgt
+    st.warning(
+        f"The official snapshot was last observed on {observed_at.day} "
+        f"{observed_at:%B %Y} Singapore time and is "
+        f"{snapshot_freshness.age_days} calendar days old. This is beyond the "
+        f"{SNAPSHOT_STALE_AFTER_DAYS}-day freshness target; refresh the data "
+        "before relying on recent-market conclusions.",
+        icon="⏳",
+    )
 
 latest_source_year = int(full_coverage["year"].max())
 latest_coverage = full_coverage.loc[full_coverage["year"].eq(latest_source_year)].iloc[

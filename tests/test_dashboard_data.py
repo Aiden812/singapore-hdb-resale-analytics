@@ -9,6 +9,7 @@ import pandas as pd
 from src.dashboard_data import (
     DashboardDataError,
     annual_trend,
+    assess_snapshot_freshness,
     binned_price_profile,
     coverage_by_year,
     filter_transactions,
@@ -40,6 +41,88 @@ def sample_data() -> pd.DataFrame:
 
 
 class DashboardDataTests(unittest.TestCase):
+    def test_snapshot_freshness_requires_a_canonical_hash_match(self) -> None:
+        metadata = {
+            "processed_sha256": "clean-csv",
+            "processed_parquet_sha256": "clean-parquet",
+            "source_modified_at_utc": "2026-09-08T20:30:00+00:00",
+        }
+
+        result = assess_snapshot_freshness(
+            metadata,
+            "clean-parquet",
+            now="2026-09-10T23:30:00+08:00",
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(str(result.observed_at_sgt.tz), "Asia/Singapore")
+        self.assertEqual(result.observed_at_sgt.day, 9)
+        self.assertEqual(result.age_days, 1)
+        self.assertFalse(result.is_stale)
+
+    def test_snapshot_freshness_accepts_verified_equivalent_hash(self) -> None:
+        metadata = {
+            "processed_sha256": "clean-csv",
+            "source_modified_at_utc": "2026-09-01T00:00:00+00:00",
+        }
+
+        result = assess_snapshot_freshness(
+            metadata,
+            "enriched-parquet",
+            equivalent_hashes=("enriched-parquet",),
+            now="2026-09-03T08:00:00+08:00",
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.age_days, 2)
+
+    def test_snapshot_is_not_stale_until_after_45_calendar_days(self) -> None:
+        metadata = {
+            "processed_sha256": "clean-csv",
+            "source_modified_at_utc": "2026-08-01T00:00:00+00:00",
+        }
+
+        boundary = assess_snapshot_freshness(
+            metadata,
+            "clean-csv",
+            now="2026-09-15T23:59:00+08:00",
+        )
+        stale = assess_snapshot_freshness(
+            metadata,
+            "clean-csv",
+            now="2026-09-16T00:00:00+08:00",
+        )
+
+        self.assertIsNotNone(boundary)
+        self.assertIsNotNone(stale)
+        assert boundary is not None and stale is not None
+        self.assertEqual(boundary.age_days, 45)
+        self.assertFalse(boundary.is_stale)
+        self.assertEqual(stale.age_days, 46)
+        self.assertTrue(stale.is_stale)
+
+    def test_snapshot_freshness_rejects_mismatch_and_invalid_timestamp(self) -> None:
+        metadata = {
+            "processed_sha256": "clean-csv",
+            "source_modified_at_utc": "2026-09-01T00:00:00+00:00",
+        }
+        self.assertIsNone(
+            assess_snapshot_freshness(
+                metadata,
+                "different-file",
+                now="2026-09-03T08:00:00+08:00",
+            )
+        )
+        self.assertIsNone(
+            assess_snapshot_freshness(
+                {**metadata, "source_modified_at_utc": "not-a-timestamp"},
+                "clean-csv",
+                now="2026-09-03T08:00:00+08:00",
+            )
+        )
+
     def test_parses_remaining_lease_variants(self) -> None:
         parsed = parse_remaining_lease_months(
             pd.Series(["74 years 03 months", "70 years", "65", None])

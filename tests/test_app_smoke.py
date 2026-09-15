@@ -71,6 +71,8 @@ class DashboardSmokeTests(unittest.TestCase):
             if isinstance(element.value, str)
         )
         self.assertIn("not a formal valuation", visible_text)
+        self.assertIn("Observed", visible_text)
+        self.assertIn("calendar days", visible_text)
 
     def test_inflation_adjusted_comparables_render_without_errors(self) -> None:
         app = AppTest.from_file(

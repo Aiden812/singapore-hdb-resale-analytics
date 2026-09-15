@@ -7,7 +7,7 @@ the analytical definitions be tested without starting a web server.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
@@ -27,10 +27,20 @@ BASE_COLUMNS = {
     "floor_area_sqm",
     "resale_price",
 }
+SNAPSHOT_STALE_AFTER_DAYS = 45
 
 
 class DashboardDataError(ValueError):
     """Raised when a CSV cannot support the dashboard calculations."""
+
+
+@dataclass(frozen=True)
+class SnapshotFreshness:
+    """Freshness details for a checksum-verified authoritative snapshot."""
+
+    observed_at_sgt: pd.Timestamp
+    age_days: int
+    is_stale: bool
 
 
 @dataclass(frozen=True)
@@ -45,6 +55,62 @@ class ComparableSalesResult:
     floor_area_tolerance: float
     storey_tolerance: float | None
     lease_tolerance: float | None
+
+
+def assess_snapshot_freshness(
+    metadata: Mapping[str, object],
+    source_sha256: str,
+    *,
+    equivalent_hashes: Sequence[str] = (),
+    now: object | None = None,
+) -> SnapshotFreshness | None:
+    """Return source freshness only when provenance and timestamp are trustworthy.
+
+    The clean CSV and Parquet hashes in the tracked manifest are authoritative.
+    Callers may supply other hashes only after independently verifying that they
+    are equivalent outputs, such as the enriched Parquet snapshot.
+    """
+    authoritative_hashes = {
+        value
+        for value in (
+            metadata.get("processed_sha256"),
+            metadata.get("processed_parquet_sha256"),
+            *equivalent_hashes,
+        )
+        if isinstance(value, str) and value
+    }
+    if source_sha256 not in authoritative_hashes:
+        return None
+
+    timestamp_value = metadata.get("source_modified_at_utc")
+    if timestamp_value is None:
+        return None
+    try:
+        observed_at = pd.Timestamp(timestamp_value)
+        current_time = (
+            pd.Timestamp.now(tz="Asia/Singapore")
+            if now is None
+            else pd.Timestamp(now)
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if pd.isna(observed_at) or pd.isna(current_time):
+        return None
+
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.tz_localize("UTC")
+    observed_at_sgt = observed_at.tz_convert("Asia/Singapore")
+    if current_time.tzinfo is None:
+        current_time = current_time.tz_localize("Asia/Singapore")
+    else:
+        current_time = current_time.tz_convert("Asia/Singapore")
+
+    age_days = max(0, (current_time.date() - observed_at_sgt.date()).days)
+    return SnapshotFreshness(
+        observed_at_sgt=observed_at_sgt,
+        age_days=age_days,
+        is_stale=age_days > SNAPSHOT_STALE_AFTER_DAYS,
+    )
 
 
 def parse_remaining_lease_months(values: pd.Series) -> pd.Series:
