@@ -90,6 +90,18 @@ st.markdown(
         margin: 0 0 1rem; color: #475569; font-size: 0.87rem;
       }
       .source-pill { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; border-radius: 999px; padding: 0.22rem 0.65rem; font-weight: 650; }
+      .coverage-notice {
+        margin: -0.25rem 0 1rem;
+        padding: 0.58rem 0.78rem;
+        border: 1px solid #fde68a;
+        border-left: 4px solid #d97706;
+        border-radius: 10px;
+        background: #fffbeb;
+        color: #78350f;
+        font-size: 0.86rem;
+        line-height: 1.4;
+      }
+      .coverage-notice strong { color: #92400e; }
       .section-kicker { color: #0f766e; font-size: 0.78rem; letter-spacing: 0.09em; text-transform: uppercase; font-weight: 750; margin-bottom: -0.45rem; }
       .small-note { color: #64748b; font-size: 0.86rem; line-height: 1.45; }
       div[data-testid="stPlotlyChart"] { background: white; border: 1px solid #e2e8f0; border-radius: 14px; padding: 0.3rem; }
@@ -227,25 +239,28 @@ def optional_report(path: Path) -> pd.DataFrame | None:
 def provisional_source_month(
     transactions: pd.DataFrame,
     source_sha256: str,
+    *,
+    equivalent_hashes: tuple[str, ...] = (),
 ) -> dict[str, object] | None:
-    """Return a provisional latest-month disclosure independent of model files."""
-    as_of = pd.Timestamp.now(tz="Asia/Singapore")
+    """Return a provisional latest-month disclosure with verified source provenance."""
+    as_of: pd.Timestamp | None = None
     if SNAPSHOT_METADATA_PATH.is_file():
         try:
             snapshot = json.loads(SNAPSHOT_METADATA_PATH.read_text(encoding="utf-8"))
             matching_hashes = {
                 snapshot.get("processed_sha256"),
                 snapshot.get("processed_parquet_sha256"),
+                *equivalent_hashes,
             }
             if source_sha256 in matching_hashes:
-                timestamp_value = snapshot.get(
-                    "source_modified_at_utc",
-                    snapshot.get("generated_at_utc"),
-                )
+                timestamp_value = snapshot.get("source_modified_at_utc")
                 if timestamp_value:
                     as_of = pd.Timestamp(timestamp_value)
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
-            pass
+            return None
+
+    if as_of is None:
+        return None
 
     if as_of.tzinfo is None:
         as_of = as_of.tz_localize("Asia/Singapore")
@@ -1018,9 +1033,9 @@ def comparable_map_figure(
     figure.update_layout(
         title=dict(
             text=(
-                "Comparable blocks and MRT network"
+                "Comparable blocks with MRT reference layer"
                 if has_sales_points
-                else "MRT network reference"
+                else "MRT reference layer"
             ),
             x=0.01,
             font=dict(size=18),
@@ -1086,8 +1101,8 @@ except DashboardDataError as exc:
 
 snapshot_freshness = None
 tracked_snapshot = tracked_snapshot_metadata()
+verified_equivalent_hashes: tuple[str, ...] = ()
 if uploaded_snapshot is None and tracked_snapshot is not None:
-    equivalent_hashes: tuple[str, ...] = ()
     if default_enriched_snapshot_is_verified():
         enrichment = enrichment_metadata() or {}
         enrichment_output = enrichment.get("output", {})
@@ -1097,11 +1112,11 @@ if uploaded_snapshot is None and tracked_snapshot is not None:
             else None
         )
         if isinstance(enriched_hash, str):
-            equivalent_hashes = (enriched_hash,)
+            verified_equivalent_hashes = (enriched_hash,)
     snapshot_freshness = assess_snapshot_freshness(
         tracked_snapshot,
         source_sha256,
-        equivalent_hashes=equivalent_hashes,
+        equivalent_hashes=verified_equivalent_hashes,
     )
 
 all_years = sorted(int(year) for year in transactions["year"].unique())
@@ -1228,14 +1243,17 @@ latest_source_year = int(full_coverage["year"].max())
 latest_coverage = full_coverage.loc[full_coverage["year"].eq(latest_source_year)].iloc[
     0
 ]
-provisional_month = provisional_source_month(transactions, source_sha256)
+provisional_month = provisional_source_month(
+    transactions,
+    source_sha256,
+    equivalent_hashes=verified_equivalent_hashes,
+)
+coverage_notes: list[str] = []
 if latest_source_year in selected_years and bool(latest_coverage["is_partial"]):
-    st.warning(
-        f"{latest_source_year} is a partial year: the snapshot contains "
-        f"{int(latest_coverage['months_observed'])} of 12 months, through "
-        f"{latest_coverage['last_month']:%B %Y}. Annual volumes and year-on-year "
-        "comparisons should be interpreted with that coverage in mind.",
-        icon="⚠️",
+    coverage_notes.append(
+        f"{latest_source_year} is partial ({int(latest_coverage['months_observed'])} "
+        f"of 12 months, through {latest_coverage['last_month']:%B %Y}); annual "
+        "comparisons need that context."
     )
 if (
     provisional_month is not None
@@ -1246,19 +1264,25 @@ if (
 ):
     as_of = provisional_month["as_of"]
     model_note = (
-        " The model index excludes this month."
+        " The model index excludes it."
         if model_metrics is not None
         and model_metrics.get("input_provenance", {}).get(
             "provisional_latest_month_excluded"
         )
         else ""
     )
-    st.warning(
+    coverage_notes.append(
         f"{provisional_month['month']} is provisional as of "
         f"{as_of.day} {as_of:%B %Y} Singapore time "
-        f"({int(provisional_month['rows']):,} records). Transaction views include "
-        f"these records.{model_note}",
-        icon="🗓️",
+        f"({int(provisional_month['rows']):,} records); transaction views include "
+        f"it.{model_note}"
+    )
+if coverage_notes:
+    st.markdown(
+        '<div class="coverage-notice"><strong>Data coverage</strong> · '
+        + " ".join(coverage_notes)
+        + "</div>",
+        unsafe_allow_html=True,
     )
 if len(filtered) < 100:
     transaction_word = "transaction" if len(filtered) == 1 else "transactions"
@@ -1289,9 +1313,9 @@ with kpi_columns[1]:
     )
 with kpi_columns[2]:
     st.metric(
-        "Median price per sqm",
-        f"{currency(float(filtered['price_per_sqm'].median()))}/sqm",
-        help="Resale price divided by floor area, then summarised by the median.",
+        "Median S$/sqm",
+        currency(float(filtered["price_per_sqm"].median())),
+        help="Median price per square metre: resale price divided by floor area.",
     )
 with kpi_columns[3]:
     st.metric(
@@ -1794,9 +1818,15 @@ with comparable_tab:
 
         mrt_exits = optional_report(MRT_EXITS_PATH)
         mrt_summary = optional_report(MRT_SUMMARY_PATH)
+        mrt_metadata = (enrichment_metadata() or {}).get("mrt", {})
+        mrt_coverage_pct = (
+            mrt_metadata.get("coverage_pct")
+            if isinstance(mrt_metadata, dict)
+            else None
+        )
         map_figure = comparable_map_figure(comparable_sales, mrt_exits)
         with st.expander(
-            "Comparable blocks and MRT context",
+            "MRT reference layer",
             expanded=map_figure is not None,
         ):
             if map_figure is not None:
@@ -1811,9 +1841,17 @@ with comparable_tab:
                     else comparable_sales.iloc[0:0]
                 )
                 if geocoded_sales.empty:
+                    coverage_text = (
+                        f" Transaction-level MRT coverage is {float(mrt_coverage_pct):g}% "
+                        "in this snapshot."
+                        if isinstance(mrt_coverage_pct, (int, float))
+                        else ""
+                    )
                     st.caption(
-                        "The map currently shows the official MRT-exit reference layer. "
-                        "Comparable blocks will appear after OneMap geocoding enrichment."
+                        "Reference layer only: the map shows official MRT exits, not "
+                        "distances joined to individual resale transactions."
+                        f"{coverage_text} Comparable blocks require validated OneMap "
+                        "geocoding enrichment."
                     )
                 elif "nearest_mrt_distance_m" in geocoded_sales.columns:
                     distance_values = geocoded_sales[
@@ -1826,8 +1864,9 @@ with comparable_tab:
                         )
             else:
                 st.caption(
-                    "The block/MRT map will appear when transaction coordinates or "
-                    "the optional MRT-station reference report are available."
+                    "The MRT reference layer will appear when the optional official "
+                    "station-exit report is available; comparable blocks additionally "
+                    "require validated transaction coordinates."
                 )
 
             if (

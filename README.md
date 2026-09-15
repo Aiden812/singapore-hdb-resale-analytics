@@ -4,12 +4,39 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-0f766e.svg)](LICENSE)
 [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://singapore-hdb-resale-analytics-aof7acp9fd7ackqqxmmi5w.streamlit.app/)
 
-A production-style analytics portfolio built from official Singapore public data.
-It combines a validated Python pipeline, Parquet and SQLite data products,
-time-aware model evaluation, an official-data enrichment layer, decision-focused
-notebooks and a six-tab Streamlit application.
+**For HDB buyers and market analysts who need to separate genuine market movement
+from changes in the mix of flats sold.** Headline resale prices can be misleading
+when flat size, town, storey, age and an incomplete latest month are not handled
+carefully.
 
-[**Read the complete analysis report**](docs/analysis_report.md)
+## What I built
+
+I built the full analytics workflow: validated ingestion of official Singapore
+data, reproducible Parquet and SQLite outputs, nominal and inflation-adjusted
+analysis, a quality-adjusted market index, chronological model evaluation, and a
+six-tab Streamlit app with transparent comparable-sales fallbacks. I also added
+provenance checks, automation, documentation and 92 automated tests so the result
+can be audited and refreshed rather than treated as a one-off notebook.
+
+## Three main findings
+
+| Finding | Evidence from the current snapshot |
+| --- | --- |
+| Resale prices rose substantially across complete years | The annual median increased from **S$410,000 in 2017 to S$628,000 in 2025 (+53.2%)**. |
+| Transaction mix does not explain away the long-run increase | From Jan 2017 to Aug 2026, the raw monthly median index rose **56.8%** and the quality-adjusted index rose **56.6%**. |
+| A time-aware model materially beats a strong recent-market baseline | On Sep 2025-Aug 2026, Ridge achieved **S$52,844 MAE**, a **35.5% improvement** over the prior-12-month town x flat-type baseline. |
+
+These are market-level results, not unit valuations; September 2026 is provisional
+and excluded from the model and price index.
+
+## Try the project
+
+[**Open the live dashboard**](https://singapore-hdb-resale-analytics-aof7acp9fd7ackqqxmmi5w.streamlit.app/)
+&nbsp;|&nbsp; [**Watch the dashboard walkthrough**](images/dashboard_demo.gif)
+&nbsp;|&nbsp; [**Read the complete analysis report**](docs/analysis_report.md)
+
+**Stack:** Python 3.12 · pandas · scikit-learn · Plotly · Streamlit · Parquet ·
+SQLite/SQL · Jupyter · GitHub Actions
 
 ![Animated walkthrough of the HDB market dashboard](images/dashboard_demo.gif)
 

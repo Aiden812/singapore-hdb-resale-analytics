@@ -53,7 +53,7 @@ class DashboardSmokeTests(unittest.TestCase):
             [radio.label for radio in self.app.radio],
         )
         self.assertIn(
-            "Comparable blocks and MRT context",
+            "MRT reference layer",
             [expander.label for expander in self.app.expander],
         )
         self.assertIn(
@@ -64,15 +64,61 @@ class DashboardSmokeTests(unittest.TestCase):
             "Rolling coverage",
             [metric.label for metric in self.app.metric],
         )
+        snapshot_metadata = json.loads(
+            (PROJECT_ROOT / "data" / "processed" / "snapshot_metadata.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        enrichment_metadata = json.loads(
+            (PROJECT_ROOT / "reports" / "official_enrichment_metadata.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        source_observed_at = pd.Timestamp(
+            snapshot_metadata["source_modified_at_utc"]
+        ).tz_convert("Asia/Singapore")
+        artifact_generated_at = pd.Timestamp(
+            enrichment_metadata["generated_at_utc"]
+        ).tz_convert("Asia/Singapore")
+        source_date = f"{source_observed_at.day} {source_observed_at:%B %Y}"
+        artifact_date = f"{artifact_generated_at.day} {artifact_generated_at:%B %Y}"
+
         visible_text = " ".join(
             element.value
-            for element_type in ("markdown", "warning")
+            for element_type in ("markdown", "warning", "caption")
             for element in self.app.get(element_type)
             if isinstance(element.value, str)
         )
         self.assertIn("not a formal valuation", visible_text)
-        self.assertIn("Observed", visible_text)
+        self.assertIn(
+            f"Observed {source_observed_at.day} {source_observed_at:%b %Y} SGT",
+            visible_text,
+        )
         self.assertIn("calendar days", visible_text)
+        self.assertIn("Data coverage", visible_text)
+        self.assertIn(f"as of {source_date}", visible_text)
+        if artifact_date != source_date:
+            self.assertNotIn(f"as of {artifact_date}", visible_text)
+        self.assertIn("Transaction-level MRT coverage is 0%", visible_text)
+        coverage_notices = [
+            element.value
+            for element in self.app.get("markdown")
+            if '<div class="coverage-notice">' in str(element.value)
+        ]
+        self.assertEqual(len(coverage_notices), 1)
+        warning_text = " ".join(
+            element.value
+            for element in self.app.get("warning")
+            if isinstance(element.value, str)
+        )
+        self.assertNotIn("partial year", warning_text)
+        self.assertNotIn("is provisional as of", warning_text)
+        price_per_sqm_metric = next(
+            metric
+            for metric in self.app.metric
+            if metric.label == "Median S$/sqm"
+        )
+        self.assertNotIn("/sqm", price_per_sqm_metric.value)
 
     def test_inflation_adjusted_comparables_render_without_errors(self) -> None:
         app = AppTest.from_file(
@@ -118,11 +164,27 @@ class DashboardSmokeTests(unittest.TestCase):
                     default_timeout=60,
                 ).run(timeout=60)
 
+            with clean_csv.open("ab") as output_file:
+                output_file.write(b"\n")
+            with patch.dict(os.environ, {"HDB_DATA_PATH": str(clean_csv)}):
+                unverified_app = AppTest.from_file(
+                    str(PROJECT_ROOT / "app.py"),
+                    default_timeout=60,
+                ).run(timeout=60)
+
         self.assertEqual(list(app.exception), [])
         self.assertIn(
             "Adjusted growth since Jan 2017",
             [metric.label for metric in app.metric],
         )
+        self.assertEqual(list(unverified_app.exception), [])
+        unverified_text = " ".join(
+            element.value
+            for element_type in ("markdown", "warning", "caption")
+            for element in unverified_app.get(element_type)
+            if isinstance(element.value, str)
+        )
+        self.assertNotIn("is provisional as of", unverified_text)
 
 
 if __name__ == "__main__":
